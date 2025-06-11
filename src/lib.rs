@@ -492,7 +492,6 @@ fn close_escrow(
         **closer.try_borrow_mut_lamports()? += refund;
     }
 
-    // Обнуляем данные
     let mut data = escrow_account.try_borrow_mut_data()?;
     data[0..EscrowAccount::LEN].fill(0);
     
