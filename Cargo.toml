@@ -1,0 +1,15 @@
+[package]
+name = "solana_smart_contract"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-program = "=1.18.2" 
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
