@@ -60,7 +60,7 @@ function App() {
             network: 'devnet',
             options: {
                 relayUrl: 'wss://relay.walletconnect.com',
-                projectId: '38295d3d88057287538e78184720b5fb'
+                projectId: 'paste your'
             }
         })
     ], []);
