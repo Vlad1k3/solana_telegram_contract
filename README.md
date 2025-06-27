@@ -4,7 +4,7 @@
 
 This project is a full-stack escrow platform on Solana, consisting of:
 - **Solana smart contract** (Rust, Anchorless)
-- **Node.js backend** (Express, SQLite, REST API, Telegram bot)
+- **Node.js backend** (Express, SQLite, REST API)
 - **React frontend** (Vite, Wallet Adapter, minimal UI)
 
 It allows two parties (buyer and seller) to create, join, and manage escrow contracts with an optional arbiter. All funds and state transitions are managed on-chain.
@@ -72,7 +72,6 @@ solana program deploy dist/solana_smart_contract.so --url devnet --keypair <KEYP
 
 - REST API for contract metadata (addresses, roles, status, txids)
 - SQLite database for off-chain contract info
-- Telegram bot integration (optional, not required for web dApp)
 - No private keys stored or used for on-chain actions
 
 ### Setup & Run
@@ -84,8 +83,6 @@ npm install
 # Start REST API (default: http://localhost:3000)
 npm run api
 
-# (Optional) Start Telegram bot
-npm start
 ```
 
 - The backend only stores public contract metadata and status.
