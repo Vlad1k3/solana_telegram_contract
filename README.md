@@ -1,4 +1,4 @@
-# Solana Escrow dApp (Telegram + Web + Smart Contract)
+# Solana Escrow dApp (Web + Smart Contract)
 
 ## Overview
 
