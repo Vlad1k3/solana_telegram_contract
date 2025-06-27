@@ -1,0 +1,50 @@
+{
+  "name": "miniapp",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@solana-mobile/wallet-adapter-mobile": "^2.2.2",
+    "@solana/wallet-adapter-backpack": "^0.1.14",
+    "@solana/wallet-adapter-base": "^0.9.27",
+    "@solana/wallet-adapter-bitkeep": "^0.3.24",
+    "@solana/wallet-adapter-ledger": "^0.9.29",
+    "@solana/wallet-adapter-nightly": "^0.1.20",
+    "@solana/wallet-adapter-phantom": "^0.9.28",
+    "@solana/wallet-adapter-react": "^0.15.39",
+    "@solana/wallet-adapter-react-ui": "^0.9.39",
+    "@solana/wallet-adapter-slope": "^0.5.21",
+    "@solana/wallet-adapter-solflare": "^0.6.32",
+    "@solana/wallet-adapter-sollet": "^0.11.17",
+    "@solana/wallet-adapter-torus": "^0.11.32",
+    "@solana/wallet-adapter-walletconnect": "^0.1.21",
+    "@solana/wallet-adapter-wallets": "^0.19.37",
+    "@solana/web3.js": "^1.98.2",
+    "buffer": "^6.0.3",
+    "cors": "^2.8.5",
+    "process": "^0.11.10",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.6.2",
+    "react-toastify": "^11.0.5",
+    "telegram-web-app": "^0.0.0",
+    "util": "^0.12.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.29.0",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.5.2",
+    "eslint": "^9.29.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.20",
+    "globals": "^16.2.0",
+    "vite": "^7.0.0"
+  }
+}

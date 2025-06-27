@@ -1,0 +1,24 @@
+{
+  "name": "solana-telegram-node-backend",
+  "version": "1.0.0",
+  "description": "Telegram bot and API backend for Solana escrow mini app.",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "api": "node api.js",
+    "dev": "nodemon bot.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.92.1",
+    "buffer": "^6.0.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "node-fetch": "^3.3.2",
+    "sqlite3": "^5.1.6",
+    "telegraf": "^4.12.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
