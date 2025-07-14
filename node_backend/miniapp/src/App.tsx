@@ -26,20 +26,20 @@ import {
     createDefaultWalletNotFoundHandler
 } from '@solana-mobile/wallet-adapter-mobile';
 import { modal, useAppKit, useAppKitAccount, useDisconnect } from './config';
+import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, createAssociatedTokenAccountInstruction, getAccount } from '@solana/spl-token';
 
 // === HARDCODED CONFIG ===
 const API_URL = 'http://localhost:3000';
-const PROGRAM_ID = new PublicKey('9tUopKjowt1d8aDcdgGcVN7zPeMTstbwyqNKNqnba6vh');
+const PROGRAM_ID = new PublicKey('7WBqX2Lo4g4BxhTwKqGijJAqBWtnSukH96SaFhJsiehg');
 const ARBITER = new PublicKey('DVPU9yF5G6TzH8LtfrACYrdAjWmgr8gd7u1xaWSu4sTQ');
 const CONNECTION_URL = 'https://api.devnet.solana.com';
-
-// Типы для CreateOrder
+const SOL_MINT = 'So11111111111111111111111111111111111111112';
 interface CreateOrderParams {
     amount: string;
     description: string;
     role: 'buyer' | 'seller';
+    mint: string;
 }
-// Типы для контрактов
 interface Contract {
     address: string;
     vault: string;
@@ -65,9 +65,7 @@ function isValidBase58(str: string): boolean {
 function App() {
     const modalInstance = useAppKit();
     const account = useAppKitAccount();
-    // Для отладки: выводим account как JSON
     console.log('account from useAppKitAccount:', account);
-    // Попробуем использовать address вместо publicKey
     const connected = !!account && !!account.address;
     const { disconnect } = useDisconnect();
     return (
@@ -108,13 +106,12 @@ function MainAppContent({ walletAddress }: MainAppContentProps) {
     const [manageContract, setManageContract] = useState<Contract | null>(null);
     const [actionsOpen, setActionsOpen] = useState<boolean>(false);
     const [showApply, setShowApply] = useState<boolean>(false);
-    const ESCROW_ACCOUNT_SIZE = 106;
+    const ESCROW_ACCOUNT_SIZE = 138;
 
-    // Получить объект PublicKey из строки
     const getPublicKey = (address: string) => new PublicKey(address);
 
     // Create a new escrow order (on-chain + backend)
-    const handleCreateOrder = async ({ amount, description, role }: CreateOrderParams): Promise<void> => {
+    const handleCreateOrder = async ({ amount, description, role, mint }: CreateOrderParams): Promise<void> => {
         if (!walletAddress || !window.solana) throw new Error('Wallet not connected');
         try {
             const connection = new Connection(CONNECTION_URL, 'confirmed');
@@ -134,19 +131,21 @@ function MainAppContent({ walletAddress }: MainAppContentProps) {
                 programId: PROGRAM_ID
             });
 
-            // 2. Prepare create_offer instruction
-            const instructionData = Buffer.alloc(1 + 1 + 8 + 32);
+            // 2. Prepare create_offer instruction (добавляем mint)
+            const instructionData = Buffer.alloc(1 + 1 + 8 + 32 + 32);
             instructionData[0] = 0; // create_offer
             instructionData[1] = role === 'buyer' ? 0 : 1; // 0 = buyer creates, 1 = seller creates
             instructionData.writeBigUInt64LE(BigInt(Number(amount)), 2);
             ARBITER.toBuffer().copy(instructionData, 10);
+            new PublicKey(mint).toBuffer().copy(instructionData, 42);
 
             const createOfferIx = new TransactionInstruction({
                 keys: [
                     { pubkey: userPubkey, isSigner: true, isWritable: true }, // initiator
                     { pubkey: escrowAccount.publicKey, isSigner: true, isWritable: true },
                     { pubkey: vault, isSigner: false, isWritable: true },
-                    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
+                    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+                    { pubkey: new PublicKey(mint), isSigner: false, isWritable: false },
                 ],
                 programId: PROGRAM_ID,
                 data: instructionData
@@ -159,12 +158,11 @@ function MainAppContent({ walletAddress }: MainAppContentProps) {
             tx.partialSign(escrowAccount); // escrow account must sign
 
             // 4. Sign and send transaction via wallet (window.solana)
-            // @ts-ignore
             const signed = await window.solana.signTransaction(tx);
             const txid = await connection.sendRawTransaction(signed.serialize());
             await connection.confirmTransaction(txid, 'confirmed');
 
-            // 5. Save contract metadata to backend
+            // 5. Save contract metadata to backend (добавляем mint)
             const res = await fetch(`${API_URL}/contracts`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -178,7 +176,8 @@ function MainAppContent({ walletAddress }: MainAppContentProps) {
                     description,
                     txid,
                     role,
-                    programId: PROGRAM_ID.toBase58()
+                    programId: PROGRAM_ID.toBase58(),
+                    mint,
                 })
             });
             if (!res.ok) {
@@ -295,18 +294,71 @@ function MainAppContent({ walletAddress }: MainAppContentProps) {
             switch (action) {
                 case 'fund': {
                     // Buyer funds the escrow (state: initialized -> funded)
+                    const mintStr = contract.mint;
+                    if (!mintStr) throw new Error('Mint is undefined');
+                    let mint: PublicKey;
+                    try {
+                        mint = new PublicKey(mintStr);
+                    } catch (e) {
+                        throw new Error('Mint is not a valid public key: ' + mintStr);
+                    }
+                    const isSol = mint.toBase58() === SOL_MINT;
+                    if (!walletAddress) throw new Error('Wallet address is undefined');
+                    if (!vault) throw new Error('Vault is undefined');
+                    console.log('funding with mint:', mint.toBase58(), 'wallet:', walletAddress, 'vault:', vault);
+                    const keys = [
+                        { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, // buyer
+                        { pubkey: new PublicKey(address), isSigner: false, isWritable: true },
+                        { pubkey: new PublicKey(vault), isSigner: false, isWritable: true },
+                        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
+                    ];
+                    const instructions = [];
+                    if (!isSol) {
+                        const connection = new Connection(CONNECTION_URL, 'confirmed');
+                        const buyerTokenAccount = await getAssociatedTokenAddress(mint, getPublicKey(walletAddress));
+                        const vaultTokenAccount = await getAssociatedTokenAddress(mint, new PublicKey(vault), true);
+                        try {
+                            await getAccount(connection, buyerTokenAccount);
+                        } catch {
+                            instructions.push(
+                                createAssociatedTokenAccountInstruction(
+                                    getPublicKey(walletAddress), 
+                                    buyerTokenAccount,
+                                    getPublicKey(walletAddress),
+                                    mint
+                                )
+                            );
+                        }
+                        try {
+                            await getAccount(connection, vaultTokenAccount);
+                        } catch {
+                            instructions.push(
+                                createAssociatedTokenAccountInstruction(
+                                    getPublicKey(walletAddress), 
+                                    vaultTokenAccount,
+                                    new PublicKey(vault),
+                                    mint
+                                )
+                            );
+                        }
+                        keys.push(
+                            { pubkey: mint, isSigner: false, isWritable: false },
+                            { pubkey: buyerTokenAccount, isSigner: false, isWritable: true },
+                            { pubkey: vaultTokenAccount, isSigner: false, isWritable: true },
+                            { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }
+                        );
+                    }
                     const data = Buffer.from([2]);
                     instruction = new TransactionInstruction({
                         programId: new PublicKey(programId),
-                        keys: [
-                            { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, // buyer
-                            { pubkey: new PublicKey(address), isSigner: false, isWritable: true },
-                            { pubkey: new PublicKey(vault), isSigner: false, isWritable: true },
-                            { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
-                        ],
+                        keys,
                         data
                     });
-                    tx = new Transaction().add(instruction);
+                    tx = new Transaction();
+                    if (instructions.length > 0) {
+                        for (const ix of instructions) tx.add(ix);
+                    }
+                    tx.add(instruction);
                     break;
                 }
                 case 'confirm': {
@@ -325,34 +377,135 @@ function MainAppContent({ walletAddress }: MainAppContentProps) {
                 }
                 case 'arbiter_confirm': {
                     // Arbiter confirms escrow, funds go to seller
+                    const mintStr = contract.mint;
+                    if (!mintStr) throw new Error('Mint is undefined');
+                    let mint: PublicKey;
+                    try {
+                        mint = new PublicKey(mintStr);
+                    } catch (e) {
+                        throw new Error('Mint is not a valid public key: ' + mintStr);
+                    }
+                    const isSol = mint.toBase58() === SOL_MINT;
+                    const keys = [
+                        { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, 
+                        { pubkey: new PublicKey(address), isSigner: false, isWritable: true },
+                        { pubkey: new PublicKey(vault), isSigner: false, isWritable: true },
+                        { pubkey: new PublicKey(seller), isSigner: false, isWritable: true }
+                    ];
+                    const instructions = [];
+                    if (!isSol) {
+                        const connection = new Connection(CONNECTION_URL, 'confirmed');
+                        const vaultTokenAccount = await getAssociatedTokenAddress(mint, new PublicKey(vault), true);
+                        const sellerTokenAccount = await getAssociatedTokenAddress(mint, new PublicKey(seller));
+                        try {
+                            await getAccount(connection, vaultTokenAccount);
+                        } catch {
+                            instructions.push(
+                                createAssociatedTokenAccountInstruction(
+                                    getPublicKey(walletAddress), 
+                                    vaultTokenAccount,
+                                    new PublicKey(vault),
+                                    mint
+                                )
+                            );
+                        }
+                        try {
+                            await getAccount(connection, sellerTokenAccount);
+                        } catch {
+                            instructions.push(
+                                createAssociatedTokenAccountInstruction(
+                                    getPublicKey(walletAddress), 
+                                    sellerTokenAccount,
+                                    new PublicKey(seller),
+                                    mint
+                                )
+                            );
+                        }
+                        keys.push(
+                            { pubkey: mint, isSigner: false, isWritable: false },
+                            { pubkey: vaultTokenAccount, isSigner: false, isWritable: true },
+                            { pubkey: sellerTokenAccount, isSigner: false, isWritable: true },
+                            { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }
+                        );
+                    }
                     const data = Buffer.from([4]);
                     instruction = new TransactionInstruction({
                         programId: new PublicKey(programId),
-                        keys: [
-                            { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, // arbiter
-                            { pubkey: new PublicKey(address), isSigner: false, isWritable: true },
-                            { pubkey: new PublicKey(vault), isSigner: false, isWritable: true },
-                            { pubkey: new PublicKey(seller), isSigner: false, isWritable: true }
-                        ],
+                        keys,
                         data
                     });
-                    tx = new Transaction().add(instruction);
+                    tx = new Transaction();
+                    if (instructions.length > 0) {
+                        for (const ix of instructions) tx.add(ix);
+                    }
+                    tx.add(instruction);
                     break;
                 }
                 case 'arbiter_cancel': {
                     // Arbiter cancels escrow, funds return to buyer
+                    const mintStr = contract.mint;
+                    if (!mintStr) throw new Error('Mint is undefined');
+                    let mint: PublicKey;
+                    try {
+                        mint = new PublicKey(mintStr);
+                    } catch (e) {
+                        throw new Error('Mint is not a valid public key: ' + mintStr);
+                    }
+                    const isSol = mint.toBase58() === SOL_MINT;
+                    const keys = [
+                        { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, // arbiter
+                        { pubkey: new PublicKey(address), isSigner: false, isWritable: true },
+                        { pubkey: new PublicKey(vault), isSigner: false, isWritable: true },
+                        { pubkey: new PublicKey(buyer), isSigner: false, isWritable: true }
+                    ];
+                    const instructions = [];
+                    if (!isSol) {
+                        const connection = new Connection(CONNECTION_URL, 'confirmed');
+                        const vaultTokenAccount = await getAssociatedTokenAddress(mint, new PublicKey(vault), true);
+                        const buyerTokenAccount = await getAssociatedTokenAddress(mint, new PublicKey(buyer));
+                        try {
+                            await getAccount(connection, vaultTokenAccount);
+                        } catch {
+                            instructions.push(
+                                createAssociatedTokenAccountInstruction(
+                                    getPublicKey(walletAddress), 
+                                    vaultTokenAccount,
+                                    new PublicKey(vault),
+                                    mint
+                                )
+                            );
+                        }
+                        // Проверяем, существует ли buyer ATA
+                        try {
+                            await getAccount(connection, buyerTokenAccount);
+                        } catch {
+                            instructions.push(
+                                createAssociatedTokenAccountInstruction(
+                                    getPublicKey(walletAddress), 
+                                    buyerTokenAccount,
+                                    new PublicKey(buyer),
+                                    mint
+                                )
+                            );
+                        }
+                        keys.push(
+                            { pubkey: mint, isSigner: false, isWritable: false },
+                            { pubkey: vaultTokenAccount, isSigner: false, isWritable: true },
+                            { pubkey: buyerTokenAccount, isSigner: false, isWritable: true },
+                            { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }
+                        );
+                    }
                     const data = Buffer.from([5]);
                     instruction = new TransactionInstruction({
                         programId: new PublicKey(programId),
-                        keys: [
-                            { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, // arbiter
-                            { pubkey: new PublicKey(address), isSigner: false, isWritable: true },
-                            { pubkey: new PublicKey(vault), isSigner: false, isWritable: true },
-                            { pubkey: new PublicKey(buyer), isSigner: false, isWritable: true }
-                        ],
+                        keys,
                         data
                     });
-                    tx = new Transaction().add(instruction);
+                    tx = new Transaction();
+                    if (instructions.length > 0) {
+                        for (const ix of instructions) tx.add(ix);
+                    }
+                    tx.add(instruction);
                     break;
                 }
                 case 'mutual_cancel': {
@@ -387,19 +540,70 @@ function MainAppContent({ walletAddress }: MainAppContentProps) {
                 }
                 case 'buyer_confirm': {
                     // Buyer confirms escrow, funds go to seller (state: seller_confirmed -> completed)
+                    const mintStr = contract.mint;
+                    if (!mintStr) throw new Error('Mint is undefined');
+                    let mint: PublicKey;
+                    try {
+                        mint = new PublicKey(mintStr);
+                    } catch (e) {
+                        throw new Error('Mint is not a valid public key: ' + mintStr);
+                    }
+                    const isSol = mint.toBase58() === SOL_MINT;
+                    const keys = [
+                        { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, // buyer
+                        { pubkey: new PublicKey(address), isSigner: false, isWritable: true }, // escrowAccount
+                        { pubkey: new PublicKey(vault), isSigner: false, isWritable: true }, // vault
+                        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
+                        { pubkey: new PublicKey(seller), isSigner: false, isWritable: true } // seller_account
+                    ];
+                    const instructions = [];
+                    if (!isSol) {
+                        const connection = new Connection(CONNECTION_URL, 'confirmed');
+                        const vaultTokenAccount = await getAssociatedTokenAddress(mint, new PublicKey(vault), true);
+                        const sellerTokenAccount = await getAssociatedTokenAddress(mint, new PublicKey(seller));
+                        // Проверяем, существует ли vault ATA
+                        try {
+                            await getAccount(connection, vaultTokenAccount);
+                        } catch {
+                            instructions.push(
+                                createAssociatedTokenAccountInstruction(
+                                    getPublicKey(walletAddress), 
+                                    vaultTokenAccount,
+                                    new PublicKey(vault),
+                                    mint
+                                )
+                            );
+                        }
+                        try {
+                            await getAccount(connection, sellerTokenAccount);
+                        } catch {
+                            instructions.push(
+                                createAssociatedTokenAccountInstruction(
+                                    getPublicKey(walletAddress),
+                                    sellerTokenAccount,
+                                    new PublicKey(seller),
+                                    mint
+                                )
+                            );
+                        }
+                        keys.push(
+                            { pubkey: mint, isSigner: false, isWritable: false },
+                            { pubkey: vaultTokenAccount, isSigner: false, isWritable: true },
+                            { pubkey: sellerTokenAccount, isSigner: false, isWritable: true },
+                            { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }
+                        );
+                    }
                     const data = Buffer.from([3]);
                     instruction = new TransactionInstruction({
                         programId: new PublicKey(programId),
-                        keys: [
-                            { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, // buyer
-                            { pubkey: new PublicKey(address), isSigner: false, isWritable: true }, // escrowAccount
-                            { pubkey: new PublicKey(vault), isSigner: false, isWritable: true }, // vault
-                            { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
-                            { pubkey: new PublicKey(seller), isSigner: false, isWritable: true } // seller_account
-                        ],
+                        keys,
                         data
                     });
-                    tx = new Transaction().add(instruction);
+                    tx = new Transaction();
+                    if (instructions.length > 0) {
+                        for (const ix of instructions) tx.add(ix);
+                    }
+                    tx.add(instruction);
                     break;
                 }
                 default:
@@ -407,7 +611,7 @@ function MainAppContent({ walletAddress }: MainAppContentProps) {
             }
             tx.feePayer = getPublicKey(walletAddress);
             tx.recentBlockhash = (await new Connection(CONNECTION_URL, 'confirmed').getRecentBlockhash()).blockhash;
-            // @ts-ignore
+        
             const signedTx = await window.solana.signTransaction(tx);
             sig = await new Connection(CONNECTION_URL, 'confirmed').sendRawTransaction(signedTx.serialize());
             await new Connection(CONNECTION_URL, 'confirmed').confirmTransaction(sig, 'confirmed');

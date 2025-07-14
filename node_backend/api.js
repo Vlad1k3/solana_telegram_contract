@@ -51,7 +51,8 @@ app.get('/users/:telegram_id', (req, res) => {
 // --- CONTRACTS ---
 // Create a new contract and store it in the database
 app.post('/contracts', async (req, res) => {
-  const { escrowAccount, vault, arbiter, buyer, seller, amount, description, txid, programId, role } = req.body;
+  console.log('CREATE CONTRACT BODY:', req.body);
+  const { escrowAccount, vault, arbiter, buyer, seller, amount, description, txid, programId, role, mint } = req.body;
   if (!escrowAccount || !vault || !arbiter || !amount || !txid || !role) {
     return res.status(400).json({ error: 'escrowAccount, vault, arbiter, amount, txid, role required' });
   }
@@ -65,9 +66,9 @@ app.post('/contracts', async (req, res) => {
       if (row) {
         return res.status(400).json({ error: `Contract with address ${escrowAccount} already exists. Try creating a new contract.` });
       }
-      // Insert new contract
+      // Insert new contract (добавляем mint)
       db.run(
-        'INSERT INTO contracts (address, vault, programId, arbiter, buyer, seller, amount, description, status, txid, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO contracts (address, vault, programId, arbiter, buyer, seller, amount, description, status, txid, role, mint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [
           escrowAccount,
           vault,
@@ -79,7 +80,8 @@ app.post('/contracts', async (req, res) => {
           description || '',
           'created',
           txid,
-          role
+          role,
+          mint || null
         ],
         function (err) {
           if (err) {
@@ -97,7 +99,8 @@ app.post('/contracts', async (req, res) => {
             description: description || '',
             status: 'created',
             txid,
-            role
+            role,
+            mint: mint || null
           });
         }
       );

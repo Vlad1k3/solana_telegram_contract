@@ -15,6 +15,12 @@ function shortAddr(addr: string): string {
     return addr.slice(0, 4) + '...' + addr.slice(-4);
 }
 
+const SOL_MINT = 'So11111111111111111111111111111111111111112';
+function shortMint(mint: string): string {
+    if (!mint) return '';
+    return mint.slice(0, 4) + '...' + mint.slice(-4);
+}
+
 interface ContractActionsProps {
     contract: Contract | null;
     open: boolean;
@@ -56,7 +62,13 @@ function ContractActions({ contract, open, onClose, onAction, arbiterAddress, wa
                     <button onClick={handleCopy} style={{ marginLeft: 8, background: 'none', border: 'none', color: '#14f195', cursor: 'pointer', fontWeight: 700 }}>{copied ? '✓' : '⧉'}</button>
                 </div>
                 <div style={{ fontSize: 14, color: '#aaa', marginBottom: 8 }}>
-                    <span>Amount: <span style={{ color: '#14f195', fontWeight: 600 }}>{(contract.amount / 1_000_000_000).toLocaleString()} SOL</span></span>
+                    <span>Amount: <span style={{ color: '#14f195', fontWeight: 600 }}>{(contract.amount / 1_000_000_000).toLocaleString()} {contract.mint === SOL_MINT ? 'SOL' : 'SPL'}</span></span>
+                </div>
+                <div style={{ fontSize: 14, color: '#aaa', marginBottom: 8 }}>
+                    Token: {contract.mint === SOL_MINT ? 'SOL' : 'SPL'}
+                    {contract.mint && contract.mint !== SOL_MINT && (
+                        <span style={{ marginLeft: 8, color: '#fff' }}>Mint: {shortMint(contract.mint)}</span>
+                    )}
                 </div>
                 <div style={{ fontSize: 14, color: '#aaa', marginBottom: 16 }}>
                     <span>Your role: <span style={{ color: '#fff', fontWeight: 600 }}>{userRole}</span></span>

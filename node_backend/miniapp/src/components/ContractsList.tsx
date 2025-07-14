@@ -1,10 +1,16 @@
 import React, { useEffect, useState } from 'react';
 
 const API_URL = 'http://localhost:3000';
+const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
 function shortAddr(addr: string): string {
     if (!addr) return '';
     return addr.slice(0, 4) + '...' + addr.slice(-4);
+}
+
+function shortMint(mint: string): string {
+    if (!mint) return '';
+    return mint.slice(0, 4) + '...' + mint.slice(-4);
 }
 
 export interface Contract {
@@ -17,6 +23,7 @@ export interface Contract {
     amount: number;
     description: string;
     status?: string;
+    mint?: string; // Added mint field
     [key: string]: any;
 }
 
@@ -108,7 +115,13 @@ function ContractsList({ walletAddress, onRemove, onManage }: ContractsListProps
                                 </button>
                             </div>
                             <div style={{ fontSize: 14, color: '#aaa', marginBottom: 4 }}>
-                                Amount: <span style={{ color: '#14f195', fontWeight: 600 }}>{(contract.amount / 1_000_000_000).toLocaleString()} SOL</span>
+                                Amount: <span style={{ color: '#14f195', fontWeight: 600 }}>{(contract.amount / 1_000_000_000).toLocaleString()} {contract.mint === SOL_MINT ? 'SOL' : 'SPL'}</span>
+                            </div>
+                            <div style={{ fontSize: 14, color: '#aaa', marginBottom: 4 }}>
+                                Token: {contract.mint === SOL_MINT ? 'SOL' : 'SPL'}
+                                {contract.mint && contract.mint !== SOL_MINT && (
+                                    <span style={{ marginLeft: 8, color: '#fff' }}>Mint: {shortMint(contract.mint)}</span>
+                                )}
                             </div>
                             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                                 <button style={{ flex: 1 }} onClick={() => onManage(contract)}>Manage</button>
