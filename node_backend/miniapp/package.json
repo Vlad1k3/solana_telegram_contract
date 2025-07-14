@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@reown/appkit-adapter-solana": "^1.7.13",
     "@solana-mobile/wallet-adapter-mobile": "^2.2.2",
     "@solana/wallet-adapter-backpack": "^0.1.14",
     "@solana/wallet-adapter-base": "^0.9.27",
@@ -26,6 +27,9 @@
     "@solana/wallet-adapter-walletconnect": "^0.1.21",
     "@solana/wallet-adapter-wallets": "^0.19.37",
     "@solana/web3.js": "^1.98.2",
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
     "buffer": "^6.0.3",
     "cors": "^2.8.5",
     "process": "^0.11.10",
@@ -34,6 +38,7 @@
     "react-router-dom": "^7.6.2",
     "react-toastify": "^11.0.5",
     "telegram-web-app": "^0.0.0",
+    "typescript": "^5.0.0",
     "util": "^0.12.5"
   },
   "devDependencies": {

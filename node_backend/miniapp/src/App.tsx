@@ -9,6 +9,7 @@ import {
     WalletConnectWalletAdapter
 } from '@solana/wallet-adapter-wallets';
 import { clusterApiUrl, Transaction, TransactionInstruction, PublicKey, Keypair, SystemProgram, Connection } from '@solana/web3.js';
+import { WalletAdapterNetwork } from '@solana/wallet-adapter-base';
 import '@solana/wallet-adapter-react-ui/styles.css';
 import ContractsList from './components/ContractsList';
 import CreateOrder from './components/CreateOrder';
@@ -24,6 +25,7 @@ import {
     createDefaultAuthorizationResultCache,
     createDefaultWalletNotFoundHandler
 } from '@solana-mobile/wallet-adapter-mobile';
+import { modal, useAppKit, useAppKitAccount, useDisconnect } from './config';
 
 // === HARDCODED CONFIG ===
 const API_URL = 'http://localhost:3000';
@@ -31,66 +33,92 @@ const PROGRAM_ID = new PublicKey('9tUopKjowt1d8aDcdgGcVN7zPeMTstbwyqNKNqnba6vh')
 const ARBITER = new PublicKey('DVPU9yF5G6TzH8LtfrACYrdAjWmgr8gd7u1xaWSu4sTQ');
 const CONNECTION_URL = 'https://api.devnet.solana.com';
 
+// Типы для CreateOrder
+interface CreateOrderParams {
+    amount: string;
+    description: string;
+    role: 'buyer' | 'seller';
+}
+// Типы для контрактов
+interface Contract {
+    address: string;
+    vault: string;
+    programId: string;
+    arbiter: string;
+    buyer: string;
+    seller: string;
+    amount: number;
+    description: string;
+    status?: string;
+    [key: string]: any;
+}
+
 // Helper to check if a string is valid base58 (for Solana addresses)
-function isValidBase58(str) {
+function isValidBase58(str: string): boolean {
     try {
-        return !!str && bs58.decode(str);
+        return !!str && !!bs58.decode(str);
     } catch {
         return false;
     }
 }
 
 function App() {
-    // Wallet adapter setup for Solana devnet
-    const network = 'devnet';
-    const endpoint = useMemo(() => clusterApiUrl(network), [network]);
-    const wallets = useMemo(() => [
-        new SolanaMobileWalletAdapter({
-            addressSelector: createDefaultAddressSelector(),
-            appIdentity: { name: "Solana Escrow Mini App" },
-            authorizationResultCache: createDefaultAuthorizationResultCache(),
-            chain: 'solana:devnet',
-            onWalletNotFound: createDefaultWalletNotFoundHandler()
-        }),
-        new SolflareWalletAdapter(),
-        new TorusWalletAdapter(),
-        new LedgerWalletAdapter(),
-        new NightlyWalletAdapter(),
-        new WalletConnectWalletAdapter({
-            network: 'devnet',
-            options: {
-                relayUrl: 'wss://relay.walletconnect.com',
-                projectId: 'paste your'
-            }
-        })
-    ], []);
-
+    const modalInstance = useAppKit();
+    const account = useAppKitAccount();
+    // Для отладки: выводим account как JSON
+    console.log('account from useAppKitAccount:', account);
+    // Попробуем использовать address вместо publicKey
+    const connected = !!account && !!account.address;
+    const { disconnect } = useDisconnect();
     return (
-        <ConnectionProvider endpoint={endpoint}>
-            <WalletProvider wallets={wallets} autoConnect>
-                <WalletModalProvider>
-                    <MainAppContent />
-                </WalletModalProvider>
-            </WalletProvider>
-        </ConnectionProvider>
+        <div style={{ maxWidth: 520, margin: '0 auto', padding: 24, background: 'linear-gradient(135deg, #191a2e 0%, #2b2d4a 100%)', minHeight: '100vh', color: '#fff', fontFamily: 'Inter, Arial, sans-serif' }}>
+            <h2 style={{ color: '#14f195', letterSpacing: 1, fontWeight: 700, marginBottom: 16 }}>Solana Escrow Mini App</h2>
+            {!connected ? (
+                <button
+                    onClick={() => modalInstance.open()}
+                    style={{ width: '100%', background: '#9945ff', color: '#fff', border: 'none', borderRadius: 8, padding: 14, fontWeight: 700, fontSize: 16, marginBottom: 24, cursor: 'pointer' }}
+                >
+                    Connect wallet
+                </button>
+            ) : (
+                <>
+                    <div style={{ marginBottom: 16 }}>
+                        <div style={{ fontSize: 14, color: '#aaa' }}>Public key:</div>
+                        <div style={{ fontWeight: 600, fontSize: 16, color: '#14f195' }}>{account.address}</div>
+                        <button
+                            onClick={() => disconnect()}
+                            style={{ marginTop: 8, background: '#23244a', color: '#fff', border: 'none', borderRadius: 8, padding: 10, fontWeight: 500, fontSize: 15, cursor: 'pointer' }}
+                        >
+                            Disconnect
+                        </button>
+                    </div>
+                    {account.address && <MainAppContent walletAddress={account.address} />}
+                </>
+            )}
+        </div>
     );
 }
 
-function MainAppContent() {
-    const { publicKey, signTransaction } = useWallet();
-    const { connection } = useConnection();
-    const walletAddress = publicKey ? publicKey.toBase58() : null;
-    const [refresh, setRefresh] = React.useState(0);
-    const [manageContract, setManageContract] = React.useState(null);
-    const [actionsOpen, setActionsOpen] = React.useState(false);
-    const [showApply, setShowApply] = useState(false);
+interface MainAppContentProps {
+    walletAddress: string;
+}
+
+function MainAppContent({ walletAddress }: MainAppContentProps) {
+    const [refresh, setRefresh] = useState<number>(0);
+    const [manageContract, setManageContract] = useState<Contract | null>(null);
+    const [actionsOpen, setActionsOpen] = useState<boolean>(false);
+    const [showApply, setShowApply] = useState<boolean>(false);
     const ESCROW_ACCOUNT_SIZE = 106;
 
+    // Получить объект PublicKey из строки
+    const getPublicKey = (address: string) => new PublicKey(address);
+
     // Create a new escrow order (on-chain + backend)
-    const handleCreateOrder = async ({ amount, description, role }) => {
-        if (!publicKey || !signTransaction) throw new Error('Wallet not connected');
+    const handleCreateOrder = async ({ amount, description, role }: CreateOrderParams): Promise<void> => {
+        if (!walletAddress || !window.solana) throw new Error('Wallet not connected');
         try {
             const connection = new Connection(CONNECTION_URL, 'confirmed');
+            const userPubkey = getPublicKey(walletAddress);
             const escrowAccount = Keypair.generate();
             const [vault, vaultBump] = await PublicKey.findProgramAddress(
                 [Buffer.from('vault'), escrowAccount.publicKey.toBuffer()],
@@ -99,7 +127,7 @@ function MainAppContent() {
 
             // 1. Create escrow account on-chain
             const createEscrowIx = SystemProgram.createAccount({
-                fromPubkey: publicKey,
+                fromPubkey: userPubkey,
                 newAccountPubkey: escrowAccount.publicKey,
                 lamports: await connection.getMinimumBalanceForRentExemption(ESCROW_ACCOUNT_SIZE),
                 space: ESCROW_ACCOUNT_SIZE,
@@ -115,7 +143,7 @@ function MainAppContent() {
 
             const createOfferIx = new TransactionInstruction({
                 keys: [
-                    { pubkey: publicKey, isSigner: true, isWritable: true }, // initiator
+                    { pubkey: userPubkey, isSigner: true, isWritable: true }, // initiator
                     { pubkey: escrowAccount.publicKey, isSigner: true, isWritable: true },
                     { pubkey: vault, isSigner: false, isWritable: true },
                     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
@@ -126,12 +154,13 @@ function MainAppContent() {
 
             // 3. Build and sign transaction
             const tx = new Transaction().add(createEscrowIx, createOfferIx);
-            tx.feePayer = publicKey;
+            tx.feePayer = userPubkey;
             tx.recentBlockhash = (await connection.getRecentBlockhash()).blockhash;
             tx.partialSign(escrowAccount); // escrow account must sign
 
-            // 4. Sign and send transaction via wallet
-            const signed = await signTransaction(tx);
+            // 4. Sign and send transaction via wallet (window.solana)
+            // @ts-ignore
+            const signed = await window.solana.signTransaction(tx);
             const txid = await connection.sendRawTransaction(signed.serialize());
             await connection.confirmTransaction(txid, 'confirmed');
 
@@ -143,8 +172,8 @@ function MainAppContent() {
                     escrowAccount: escrowAccount.publicKey.toBase58(),
                     vault: vault.toBase58(),
                     arbiter: ARBITER.toBase58(),
-                    buyer: role === 'buyer' ? publicKey.toBase58() : null,
-                    seller: role === 'seller' ? publicKey.toBase58() : null,
+                    buyer: role === 'buyer' ? userPubkey.toBase58() : null,
+                    seller: role === 'seller' ? userPubkey.toBase58() : null,
                     amount: Number(amount),
                     description,
                     txid,
@@ -157,7 +186,7 @@ function MainAppContent() {
                 throw new Error(err.error || 'Order creation error');
             }
             setRefresh(r => r + 1);
-        } catch (error) {
+        } catch (error: any) {
             console.error('Error creating contract:', error);
             if (error.logs) {
                 alert((error.message || 'Order creation error') + '\n\nLogs:\n' + error.logs.join('\n'));
@@ -168,10 +197,12 @@ function MainAppContent() {
     };
 
     // Join an existing escrow order (on-chain + backend)
-    const handleApplyOrder = async (escrowAddress) => {
-        if (!publicKey || !signTransaction) throw new Error('Wallet not connected');
+    const handleApplyOrder = async (escrowAddress: string): Promise<void> => {
+        if (!walletAddress || !window.solana) throw new Error('Wallet not connected');
         if (!isValidBase58(escrowAddress)) throw new Error('Invalid contract address');
         try {
+            const connection = new Connection(CONNECTION_URL, 'confirmed');
+            const userPubkey = getPublicKey(walletAddress);
             // 1. Fetch contract info from backend
             const contractRes = await fetch(`${API_URL}/contracts/by_address/${escrowAddress}`);
             if (!contractRes.ok) {
@@ -189,26 +220,27 @@ function MainAppContent() {
             const data = Buffer.alloc(1 + 1 + 32);
             data[0] = 1; // join_offer
             data[1] = joinerRole === 'buyer' ? 0 : 1; // 0 = buyer joins, 1 = seller joins
-            Buffer.from(new PublicKey(publicKey).toBytes()).copy(data, 2);
+            Buffer.from(userPubkey.toBytes()).copy(data, 2);
             const instruction = new TransactionInstruction({
                 programId: PROGRAM_ID,
                 keys: [
-                    { pubkey: publicKey, isSigner: true, isWritable: true }, // joiner
+                    { pubkey: userPubkey, isSigner: true, isWritable: true }, // joiner
                     { pubkey: new PublicKey(escrowAddress), isSigner: false, isWritable: true }
                 ],
                 data
             });
             // 4. Build and sign transaction
             const tx = new Transaction().add(instruction);
-            tx.feePayer = publicKey;
+            tx.feePayer = userPubkey;
             tx.recentBlockhash = (await connection.getRecentBlockhash()).blockhash;
-            const signedTx = await signTransaction(tx);
+            // @ts-ignore
+            const signedTx = await window.solana.signTransaction(tx);
             // 5. Send transaction
             const sig = await connection.sendRawTransaction(signedTx.serialize());
             await connection.confirmTransaction(sig, 'confirmed');
             // 6. Update backend with join info
             const body = {
-                joiner: publicKey.toBase58(),
+                joiner: userPubkey.toBase58(),
                 escrowAccount: escrowAddress,
                 programId: PROGRAM_ID.toBase58(),
                 txid: sig,
@@ -224,7 +256,7 @@ function MainAppContent() {
                 throw new Error(err.error || 'Order join error');
             }
             setRefresh(r => r + 1);
-        } catch (error) {
+        } catch (error: any) {
             console.error('Error join order:', error);
             if (error.logs) {
                 alert((error.message || 'Order join error') + '\n\nLogs:\n' + error.logs.join('\n'));
@@ -236,7 +268,7 @@ function MainAppContent() {
     };
 
     // Remove contract from backend (only allowed in certain states)
-    const handleRemoveContract = async (address) => {
+    const handleRemoveContract = async (address: string): Promise<void> => {
         const res = await fetch(`${API_URL}/contracts/${address}`, {
             method: 'DELETE'
         });
@@ -248,18 +280,18 @@ function MainAppContent() {
     };
 
     // Open contract management modal
-    const handleManageContract = (contract) => {
+    const handleManageContract = (contract: Contract): void => {
         setManageContract(contract);
         setActionsOpen(true);
     };
 
     // Handle all contract actions (fund, confirm, buyer_confirm, arbiter_confirm, etc.)
-    const handleAction = async (action) => {
-        if (!manageContract || !publicKey || !signTransaction) return;
+    const handleAction = async (action: string): Promise<void> => {
+        if (!manageContract || !walletAddress || !window.solana) return;
         const contract = manageContract;
         const { address, vault, programId, arbiter, buyer, seller } = contract;
         try {
-            let instruction, tx, sig, body;
+            let instruction: TransactionInstruction, tx: Transaction, sig: string, body: any;
             switch (action) {
                 case 'fund': {
                     // Buyer funds the escrow (state: initialized -> funded)
@@ -267,7 +299,7 @@ function MainAppContent() {
                     instruction = new TransactionInstruction({
                         programId: new PublicKey(programId),
                         keys: [
-                            { pubkey: publicKey, isSigner: true, isWritable: true }, // buyer
+                            { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, // buyer
                             { pubkey: new PublicKey(address), isSigner: false, isWritable: true },
                             { pubkey: new PublicKey(vault), isSigner: false, isWritable: true },
                             { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
@@ -283,7 +315,7 @@ function MainAppContent() {
                     instruction = new TransactionInstruction({
                         programId: new PublicKey(programId),
                         keys: [
-                            { pubkey: publicKey, isSigner: true, isWritable: true }, // seller
+                            { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, // seller
                             { pubkey: new PublicKey(address), isSigner: false, isWritable: true }
                         ],
                         data
@@ -297,7 +329,7 @@ function MainAppContent() {
                     instruction = new TransactionInstruction({
                         programId: new PublicKey(programId),
                         keys: [
-                            { pubkey: publicKey, isSigner: true, isWritable: true }, // arbiter
+                            { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, // arbiter
                             { pubkey: new PublicKey(address), isSigner: false, isWritable: true },
                             { pubkey: new PublicKey(vault), isSigner: false, isWritable: true },
                             { pubkey: new PublicKey(seller), isSigner: false, isWritable: true }
@@ -313,7 +345,7 @@ function MainAppContent() {
                     instruction = new TransactionInstruction({
                         programId: new PublicKey(programId),
                         keys: [
-                            { pubkey: publicKey, isSigner: true, isWritable: true }, // arbiter
+                            { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, // arbiter
                             { pubkey: new PublicKey(address), isSigner: false, isWritable: true },
                             { pubkey: new PublicKey(vault), isSigner: false, isWritable: true },
                             { pubkey: new PublicKey(buyer), isSigner: false, isWritable: true }
@@ -329,8 +361,8 @@ function MainAppContent() {
                     instruction = new TransactionInstruction({
                         programId: new PublicKey(programId),
                         keys: [
-                            { pubkey: new PublicKey(buyer), isSigner: true, isWritable: true },
-                            { pubkey: new PublicKey(seller), isSigner: true, isWritable: true },
+                            { pubkey: getPublicKey(buyer), isSigner: true, isWritable: true },
+                            { pubkey: getPublicKey(seller), isSigner: true, isWritable: true },
                             { pubkey: new PublicKey(address), isSigner: false, isWritable: true },
                             { pubkey: new PublicKey(vault), isSigner: false, isWritable: true }
                         ],
@@ -345,7 +377,7 @@ function MainAppContent() {
                     instruction = new TransactionInstruction({
                         programId: new PublicKey(programId),
                         keys: [
-                            { pubkey: publicKey, isSigner: true, isWritable: true }, // closer
+                            { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, // closer
                             { pubkey: new PublicKey(address), isSigner: false, isWritable: true }
                         ],
                         data
@@ -359,7 +391,7 @@ function MainAppContent() {
                     instruction = new TransactionInstruction({
                         programId: new PublicKey(programId),
                         keys: [
-                            { pubkey: publicKey, isSigner: true, isWritable: true }, // buyer
+                            { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, // buyer
                             { pubkey: new PublicKey(address), isSigner: false, isWritable: true }, // escrowAccount
                             { pubkey: new PublicKey(vault), isSigner: false, isWritable: true }, // vault
                             { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
@@ -373,16 +405,17 @@ function MainAppContent() {
                 default:
                     throw new Error('Unknown action');
             }
-            tx.feePayer = publicKey;
-            tx.recentBlockhash = (await connection.getRecentBlockhash()).blockhash;
-            const signedTx = await signTransaction(tx);
-            sig = await connection.sendRawTransaction(signedTx.serialize());
-            await connection.confirmTransaction(sig, 'confirmed');
+            tx.feePayer = getPublicKey(walletAddress);
+            tx.recentBlockhash = (await new Connection(CONNECTION_URL, 'confirmed').getRecentBlockhash()).blockhash;
+            // @ts-ignore
+            const signedTx = await window.solana.signTransaction(tx);
+            sig = await new Connection(CONNECTION_URL, 'confirmed').sendRawTransaction(signedTx.serialize());
+            await new Connection(CONNECTION_URL, 'confirmed').confirmTransaction(sig, 'confirmed');
             body = {
                 contract: address,
                 action,
                 txid: sig,
-                actor: publicKey.toBase58()
+                actor: getPublicKey(walletAddress).toBase58()
             };
             // Map action to status for backend update
             let status = null;
@@ -403,7 +436,7 @@ function MainAppContent() {
             setActionsOpen(false);
             setManageContract(null);
             setRefresh(r => r + 1);
-        } catch (e) {
+        } catch (e: any) {
             if (e.logs) {
                 alert((e.message || 'Action error') + '\n\nLogs:\n' + e.logs.join('\n'));
             } else {
@@ -415,44 +448,26 @@ function MainAppContent() {
     return (
         <div style={{ maxWidth: 520, margin: '0 auto', padding: 24, background: 'linear-gradient(135deg, #191a2e 0%, #2b2d4a 100%)', minHeight: '100vh', color: '#fff', fontFamily: 'Inter, Arial, sans-serif' }}>
             <h2 style={{ color: '#14f195', letterSpacing: 1, fontWeight: 700, marginBottom: 16 }}>Solana Escrow Mini App</h2>
-            <WalletMultiButton style={{ background: '#9945ff', color: '#fff', borderRadius: 8, marginBottom: 12 }} />
-            <button
-                onClick={() => {
-                    localStorage.removeItem('walletName');
-                    localStorage.removeItem('walletAdapter');
-                    localStorage.removeItem('selectedWallet');
-                    localStorage.removeItem('wallet');
-                    localStorage.removeItem('walletconnect');
-                    localStorage.removeItem('nightly:wallets');
-                    window.location.reload();
-                }}
-                style={{ width: '100%', background: '#23244a', color: '#fff', border: 'none', borderRadius: 8, padding: 10, fontWeight: 500, fontSize: 15, marginBottom: 24, cursor: 'pointer' }}
-            >
-                Reset wallet selection
-            </button>
-            {walletAddress && (
-                <>
-                    <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
-                        <button onClick={() => setShowApply(false)} style={{ flex: 1, background: !showApply ? '#14f195' : '#23244a', color: !showApply ? '#191a2e' : '#fff', border: 'none', borderRadius: 8, padding: 12, fontWeight: 600, fontSize: 16, cursor: 'pointer', transition: 'all 0.2s' }}>Create order</button>
-                        <button onClick={() => setShowApply(true)} style={{ flex: 1, background: showApply ? '#14f195' : '#23244a', color: showApply ? '#191a2e' : '#fff', border: 'none', borderRadius: 8, padding: 12, fontWeight: 600, fontSize: 16, cursor: 'pointer', transition: 'all 0.2s' }}>Join order</button>
-                    </div>
-                    {!showApply && <CreateOrder onCreate={handleCreateOrder} />}
-                    {showApply && <ApplyOrder onApply={handleApplyOrder} onBack={() => setShowApply(false)} />}
-                    <ContractsList
-                        walletAddress={walletAddress}
-                        key={refresh}
-                        onRemove={handleRemoveContract}
-                        onManage={handleManageContract}
-                    />
-                    <ContractActions
-                        contract={manageContract}
-                        open={actionsOpen}
-                        onClose={() => setActionsOpen(false)}
-                        onAction={handleAction}
-                        arbiterAddress={ARBITER.toBase58()}
-                    />
-                </>
-            )}
+            <div style={{ display: 'flex', gap: 12, marginBottom: 16 }}>
+                <button onClick={() => setShowApply(false)} style={{ flex: 1, background: !showApply ? '#14f195' : '#23244a', color: !showApply ? '#191a2e' : '#fff', border: 'none', borderRadius: 8, padding: 12, fontWeight: 600, fontSize: 16, cursor: 'pointer', transition: 'all 0.2s' }}>Create order</button>
+                <button onClick={() => setShowApply(true)} style={{ flex: 1, background: showApply ? '#14f195' : '#23244a', color: showApply ? '#191a2e' : '#fff', border: 'none', borderRadius: 8, padding: 12, fontWeight: 600, fontSize: 16, cursor: 'pointer', transition: 'all 0.2s' }}>Join order</button>
+            </div>
+            {!showApply && <CreateOrder onCreate={handleCreateOrder} />}
+            {showApply && <ApplyOrder onApply={handleApplyOrder} onBack={() => setShowApply(false)} />}
+            <ContractsList
+                walletAddress={walletAddress}
+                key={refresh}
+                onRemove={handleRemoveContract}
+                onManage={handleManageContract}
+            />
+            <ContractActions
+                contract={manageContract}
+                open={actionsOpen}
+                onClose={() => setActionsOpen(false)}
+                onAction={handleAction}
+                arbiterAddress={ARBITER.toBase58()}
+                walletAddress={walletAddress}
+            />
         </div>
     );
 }

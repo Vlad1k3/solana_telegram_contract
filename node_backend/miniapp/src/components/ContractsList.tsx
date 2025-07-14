@@ -2,16 +2,35 @@ import React, { useEffect, useState } from 'react';
 
 const API_URL = 'http://localhost:3000';
 
-function shortAddr(addr) {
+function shortAddr(addr: string): string {
     if (!addr) return '';
     return addr.slice(0, 4) + '...' + addr.slice(-4);
 }
 
-function ContractsList({ walletAddress, onRemove, onManage }) {
-    const [contracts, setContracts] = useState([]);
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState(null);
-    const [copied, setCopied] = useState('');
+export interface Contract {
+    address: string;
+    vault: string;
+    programId: string;
+    arbiter: string;
+    buyer: string;
+    seller: string;
+    amount: number;
+    description: string;
+    status?: string;
+    [key: string]: any;
+}
+
+interface ContractsListProps {
+    walletAddress: string;
+    onRemove: (address: string) => void;
+    onManage: (contract: Contract) => void;
+}
+
+function ContractsList({ walletAddress, onRemove, onManage }: ContractsListProps) {
+    const [contracts, setContracts] = useState<Contract[]>([]);
+    const [loading, setLoading] = useState<boolean>(false);
+    const [error, setError] = useState<string | null>(null);
+    const [copied, setCopied] = useState<string>('');
 
     useEffect(() => {
         if (!walletAddress) return;
@@ -37,25 +56,25 @@ function ContractsList({ walletAddress, onRemove, onManage }) {
             .finally(() => setLoading(false));
     }, [walletAddress]);
 
-    const handleCopy = (addr) => {
+    const handleCopy = (addr: string) => {
         navigator.clipboard.writeText(addr);
         setCopied(addr);
         setTimeout(() => setCopied(''), 1200);
     };
 
-    if (!walletAddress) return <div>Подключите кошелек для просмотра контрактов.</div>;
-    if (loading) return <div>Загрузка контрактов...</div>;
-    if (error) return <div>Ошибка загрузки: {error}</div>;
-    if (!contracts.length) return <div>Контракты не найдены.</div>;
+    if (!walletAddress) return <div>Connect your wallet to view contracts.</div>;
+    if (loading) return <div>Loading contracts...</div>;
+    if (error) return <div>Error loading: {error}</div>;
+    if (!contracts.length) return <div>No contracts found.</div>;
 
     return (
         <div style={{ marginTop: 24 }}>
-            <h3>Ваши контракты</h3>
+            <h3>Your contracts</h3>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
                 {contracts.map(contract => {
                     const isSeller = contract.seller === walletAddress;
                     const isBuyer = contract.buyer === walletAddress;
-                    let userRole = isSeller ? 'Продавец' : isBuyer ? 'Покупатель' : '';
+                    let userRole = isSeller ? 'Seller' : isBuyer ? 'Buyer' : '';
                     let badgeColor = contract.status === 'funded' ? '#14f195' : contract.status === 'seller_confirmed' ? '#9945ff' : '#23244a';
                     return (
                         <div key={contract.address || contract.id} className="card">
@@ -65,7 +84,7 @@ function ContractsList({ walletAddress, onRemove, onManage }) {
                             </div>
                             <div style={{ fontWeight: 600, fontSize: 17, marginBottom: 4 }}>{contract.description}</div>
                             <div style={{ fontSize: 14, color: '#aaa', marginBottom: 4 }}>
-                                Адрес: <span style={{ color: '#14f195', fontWeight: 500 }}>{shortAddr(contract.address)}</span>
+                                Address: <span style={{ color: '#14f195', fontWeight: 500 }}>{shortAddr(contract.address)}</span>
                                 <button
                                     onClick={() => handleCopy(contract.address)}
                                     style={{
@@ -83,14 +102,17 @@ function ContractsList({ walletAddress, onRemove, onManage }) {
                                         display: 'inline',
                                         verticalAlign: 'middle'
                                     }}
-                                    title="Скопировать адрес"
+                                    title="Copy address"
                                 >
                                     {copied === contract.address ? '✓' : '⧉'}
                                 </button>
                             </div>
+                            <div style={{ fontSize: 14, color: '#aaa', marginBottom: 4 }}>
+                                Amount: <span style={{ color: '#14f195', fontWeight: 600 }}>{(contract.amount / 1_000_000_000).toLocaleString()} SOL</span>
+                            </div>
                             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                                <button style={{ flex: 1 }} onClick={() => onManage(contract)}>Управлять</button>
-                                <button style={{ flex: 1, background: '#ff3860', color: '#fff' }} onClick={() => onRemove(contract.address)}>Удалить</button>
+                                <button style={{ flex: 1 }} onClick={() => onManage(contract)}>Manage</button>
+                                <button style={{ flex: 1, background: '#ff3860', color: '#fff' }} onClick={() => onRemove(contract.address)}>Delete</button>
                             </div>
                         </div>
                     );
