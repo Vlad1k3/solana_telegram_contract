@@ -30,7 +30,8 @@ export default defineConfig({
       '9267-185-115-4-12.ngrok-free.app',
       '0948-185-115-4-12.ngrok-free.app',
       '5e7a-185-70-52-227.ngrok-free.app',
-      '5db5eafcfda4.ngrok-free.app'
+      '5db5eafcfda4.ngrok-free.app',
+      'b394e2598c9e.ngrok-free.app'
     ],
   },
 })

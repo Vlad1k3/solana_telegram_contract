@@ -84,12 +84,12 @@ function CreateOrder({ onCreate }: CreateOrderProps) {
                     {isSol ? <span style={{ fontWeight: 700 }}>SOL</span> : <span style={{ fontWeight: 700 }}>SPL</span>}
                 </button>
             </div>
-            <input
-                type="text"
+            <textarea
                 placeholder="Description"
                 value={description}
                 onChange={e => setDescription(e.target.value)}
-                style={{ width: '100%', marginBottom: 12, padding: 12, borderRadius: 8, border: 'none', background: '#191a2e', color: '#fff', fontSize: 16 }}
+                className="order-description-textarea"
+                rows={3}
             />
             <button type="submit" disabled={loading} style={{ width: '100%', background: '#14f195', color: '#191a2e', border: 'none', borderRadius: 8, padding: 14, fontWeight: 700, fontSize: 16, marginTop: 8, cursor: 'pointer', transition: 'all 0.2s' }}>
                 {loading ? 'Creating...' : 'Create'}

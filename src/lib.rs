@@ -191,7 +191,7 @@ fn create_offer(
 
     if !initiator.is_signer {
         msg!("Initiator must be signer");
-        return Err(ProgramError::MissingRequiredSignature);
+       return Err(ProgramError::MissingRequiredSignature);
     }
 
     let (vault_pda, vault_bump) = Pubkey::find_program_address(
@@ -201,6 +201,33 @@ fn create_offer(
     if vault_pda != *vault.key {
         msg!("Invalid vault PDA");
         return Err(ProgramError::InvalidSeeds);
+    }
+
+        let rent = Rent::get()?;
+    let required_lamports = rent.minimum_balance(EscrowAccount::LEN);
+
+    if escrow_account.lamports() == 0 {
+        let create_ix = system_instruction::create_account(
+            initiator.key,
+            escrow_account.key,
+            required_lamports,
+            EscrowAccount::LEN as u64,
+            program_id,
+        );
+        // Seed для escrow PDA: например, [b"escrow", initiator.key.as_ref()]
+        let (escrow_pda, escrow_bump) = Pubkey::find_program_address(
+            &[b"escrow", initiator.key.as_ref()],
+            program_id,
+        );
+        if escrow_pda != *escrow_account.key {
+            msg!("Invalid escrow PDA");
+            return Err(ProgramError::InvalidSeeds);
+        }
+        invoke_signed(
+            &create_ix,
+            &[initiator.clone(), escrow_account.clone(), system_program.clone()],
+            &[&[b"escrow", initiator.key.as_ref(), &[escrow_bump]]],
+        )?;
     }
 
     // Set roles based on who creates the offer

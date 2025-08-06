@@ -36,7 +36,7 @@ function ApplyOrder({ onApply, onBack }: ApplyOrderProps) {
                 placeholder="Contract address"
                 value={address}
                 onChange={e => setAddress(e.target.value)}
-                style={{ width: '100%', marginBottom: 12, padding: 12, borderRadius: 8, border: 'none', background: '#191a2e', color: '#fff', fontSize: 16 }}
+                className="apply-order-input"
             />
             <button type="submit" disabled={loading} style={{ width: '100%', background: '#14f195', color: '#191a2e', border: 'none', borderRadius: 8, padding: 14, fontWeight: 700, fontSize: 16, marginTop: 8, cursor: 'pointer', transition: 'all 0.2s' }}>
                 {loading ? 'Joining...' : 'Join'}

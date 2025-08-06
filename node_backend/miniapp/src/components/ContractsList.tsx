@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 
-const API_URL = 'http://localhost:3000';
+const API_URL = 'https://55c14c3635b6.ngrok-free.app';
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
 function shortAddr(addr: string): string {
@@ -44,7 +44,12 @@ function ContractsList({ walletAddress, onRemove, onManage }: ContractsListProps
         setLoading(true);
         setError(null);
         
-        fetch(`${API_URL}/contracts/user/${walletAddress}`)
+        fetch(`${API_URL}/contracts/user/${walletAddress}`, {
+            method: "get",
+            headers: new Headers({
+                "ngrok-skip-browser-warning": "69420",
+            }),
+        })
             .then(res => {
                 if (!res.ok) {
                     throw new Error(`HTTP error! status: ${res.status}`);
@@ -89,9 +94,9 @@ function ContractsList({ walletAddress, onRemove, onManage }: ContractsListProps
                                 <span className="status-badge" style={{ background: badgeColor, color: badgeColor === '#14f195' ? '#191a2e' : '#fff' }}>{contract.status}</span>
                                 <span className="role-badge">{userRole}</span>
                             </div>
-                            <div style={{ fontWeight: 600, fontSize: 17, marginBottom: 4 }}>{contract.description}</div>
+                            <div style={{ fontWeight: 600, fontSize: 17, marginBottom: 4 }} className="card-description">{contract.description}</div>
                             <div style={{ fontSize: 14, color: '#aaa', marginBottom: 4 }}>
-                                Address: <span style={{ color: '#14f195', fontWeight: 500 }}>{shortAddr(contract.address)}</span>
+                                Address: <span style={{ color: '#14f195', fontWeight: 500 }} className="card-address">{shortAddr(contract.address)}</span>
                                 <button
                                     onClick={() => handleCopy(contract.address)}
                                     style={{

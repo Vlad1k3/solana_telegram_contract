@@ -7,14 +7,36 @@ const { db, initDb } = require('./db');
 const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3000;
-const { createOffer, joinOffer, fundEscrow, confirmEscrow, arbiterConfirm, arbiterCancel, mutualCancel, closeEscrow } = require('./solana');
-const solanaWeb3 = require('@solana/web3.js');
+
+// Middleware to bypass ngrok warning page
+app.use((req, res, next) => {
+  res.setHeader('ngrok-skip-browser-warning', 'true');
+  next();
+});
+
+// CORS configuration
+const corsOptions = {
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning'],
+  exposedHeaders: ['Content-Length', 'X-Total-Count']
+};
+app.use(cors(corsOptions));
 
 app.use(express.json());
-app.use(cors());
 
 // Initialize the database tables
 initDb();
+
+// Health check endpoint with ngrok header
+app.get('/healthcheck', (req, res) => {
+  res.setHeader('ngrok-skip-browser-warning', 'true');
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    ngrok: process.env.NGROK || 'local'
+  });
+});
 
 // Health check endpoint
 app.get('/', (req, res) => {

@@ -6,8 +6,13 @@ import { Buffer } from 'buffer'
 
 if (!window.Buffer) window.Buffer = Buffer
 
-createRoot(document.getElementById('root')).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-)
+const rootElement = document.getElementById('root');
+if (rootElement) {
+  createRoot(rootElement).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+} else {
+  throw new Error("Root element not found");
+}
