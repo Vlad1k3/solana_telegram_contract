@@ -1,3 +1,15 @@
+//! # Solana Escrow Program
+//! 
+//! This program implements a secure escrow system for SOL and SPL token transactions
+//! between two parties with an optional arbiter for dispute resolution.
+//! 
+//! ## Features
+//! - Support for both SOL and SPL token escrows
+//! - Three-party system: buyer, seller, and arbiter
+//! - Multiple confirmation flows for secure transactions
+//! - Mutual cancellation support
+//! - PDA-based vault system for secure fund storage
+
 use solana_program::{
     account_info::{next_account_info, AccountInfo},
     entrypoint,
@@ -13,126 +25,30 @@ use solana_program::{
 use spl_token;
 use spl_token::solana_program::pubkey as spl_pubkey;
 
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-/// Possible states of the escrow contract
-pub enum EscrowState {
-    Uninitialized = 0,   // Account not initialized
-    Created = 1,        // Offer created, only one party set
-    Initialized = 2,    // Both parties set, ready to fund
-    Funded = 3,         // Buyer funded escrow
-    SellerConfirmed = 4,// Seller confirmed fulfillment
-    BuyerConfirmed = 5, // (Unused, for future extension)
-    Completed = 6,      // Funds released to seller
-    Cancelled = 7,      // Escrow cancelled
-}
+mod state;
+mod instructions;
+mod utils;
 
-#[repr(C)]
-#[derive(Debug)]
-/// Main escrow account data structure
-pub struct EscrowAccount {
-    buyer: Pubkey,       // Buyer's public key
-    seller: Pubkey,      // Seller's public key
-    arbiter: Pubkey,     // Arbiter's public key
-    amount: u64,         // Amount in lamports or tokens
-    state: u8,           // Current state (EscrowState)
-    vault_bump: u8,      // PDA bump for vault
-    mint: Pubkey,        // SPL token mint (Pubkey::default() for SOL)
-}
+use state::{EscrowAccount, EscrowState};
+use instructions::{EscrowInstruction};
+use utils::{TokenTransfer, ValidationHelper, AccountHelper};
 
-impl EscrowAccount {
-    const LEN: usize = 32 + 32 + 32 + 8 + 1 + 1 + 32; // Size of account data
+/// Комиссия сервиса за создание ордера (0.01 SOL в lamports)
+const SERVICE_FEE: u64 = 10_000_000;
 
-    /// Create a new escrow account instance
-    fn new(
-        buyer: &Pubkey,
-        arbiter: &Pubkey,
-        amount: u64,
-        vault_bump: u8,
-        mint: &Pubkey,
-    ) -> Self {
-        Self {
-            buyer: *buyer,
-            seller: Pubkey::default(),
-            arbiter: *arbiter,
-            amount,
-            state: EscrowState::Created as u8,
-            vault_bump,
-            mint: *mint,
-        }
-    }
-    
-    /// Deserialize account data into EscrowAccount
-    fn from_account_data(data: &[u8]) -> Result<Self, ProgramError> {
-        if data.len() != Self::LEN {
-            msg!("Invalid account size: expected {}, got {}", Self::LEN, data.len());
-            return Err(ProgramError::InvalidAccountData);
-        }
-        
-        let buyer = Pubkey::new_from_array(data[0..32].try_into().unwrap());
-        let seller = Pubkey::new_from_array(data[32..64].try_into().unwrap());
-        let arbiter = Pubkey::new_from_array(data[64..96].try_into().unwrap());
-        let amount = u64::from_le_bytes(data[96..104].try_into().unwrap());
-        let state = data[104];
-        let vault_bump = data[105];
-        let mint = Pubkey::new_from_array(data[106..138].try_into().unwrap());
-        
-        Ok(Self {
-            buyer,
-            seller,
-            arbiter,
-            amount,
-            state,
-            vault_bump,
-            mint,
-        })
-    }
-    
-    /// Serialize EscrowAccount into account data
-    fn save_to_account(&self, account: &AccountInfo) -> ProgramResult {
-        let mut data = account.try_borrow_mut_data()?;
-        if data.len() < Self::LEN {
-            return Err(ProgramError::InvalidAccountData);
-        }
-        
-        data[0..32].copy_from_slice(self.buyer.as_ref());
-        data[32..64].copy_from_slice(self.seller.as_ref());
-        data[64..96].copy_from_slice(self.arbiter.as_ref());
-        data[96..104].copy_from_slice(&self.amount.to_le_bytes());
-        data[104] = self.state;
-        data[105] = self.vault_bump;
-        data[106..138].copy_from_slice(self.mint.as_ref());
-        
-        Ok(())
-    }
-    
-    /// Get the current state as EscrowState enum
-    fn get_state(&self) -> Result<EscrowState, ProgramError> {
-        match self.state {
-            0 => Ok(EscrowState::Uninitialized),
-            1 => Ok(EscrowState::Created),
-            2 => Ok(EscrowState::Initialized),
-            3 => Ok(EscrowState::Funded),
-            4 => Ok(EscrowState::SellerConfirmed),
-            5 => Ok(EscrowState::BuyerConfirmed),
-            6 => Ok(EscrowState::Completed),
-            7 => Ok(EscrowState::Cancelled),
-            _ => {
-                msg!("Invalid escrow state: {}", self.state);
-                Err(ProgramError::InvalidAccountData)
-            }
-        }
-    }
-    
-    /// Set the current state
-    fn set_state(&mut self, state: EscrowState) {
-        self.state = state as u8;
-    }
-}
 
 entrypoint!(process_instruction);
 
-/// Main entrypoint. Dispatches instructions by index.
+/// Main program entrypoint that dispatches instructions based on the first byte
+/// of instruction data.
+/// 
+/// # Arguments
+/// * `program_id` - The program ID
+/// * `accounts` - Array of account infos required for the instruction
+/// * `instruction_data` - Serialized instruction data
+/// 
+/// # Returns
+/// * `ProgramResult` - Success or failure of the instruction execution
 fn process_instruction(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -142,57 +58,73 @@ fn process_instruction(
         return Err(ProgramError::InvalidInstructionData);
     }
     
-    let instruction_type = instruction_data[0];
-    match instruction_type {
-        0 => create_offer(program_id, accounts, instruction_data),
-        1 => join_offer(program_id, accounts, instruction_data),
-        2 => fund_escrow(program_id, accounts),
-        3 => confirm_escrow(program_id, accounts),
-        4 => arbiter_confirm(program_id, accounts),
-        5 => arbiter_cancel(program_id, accounts),
-        6 => close_escrow(program_id, accounts),
-        7 => get_escrow_info(program_id, accounts),
-        8 => mutual_cancel(program_id, accounts),
-        9 => seller_confirm(program_id, accounts),
-        _ => Err(ProgramError::InvalidInstructionData),
+    let instruction = EscrowInstruction::from_u8(instruction_data[0])?;
+    
+    match instruction {
+        EscrowInstruction::CreateOffer => create_offer(program_id, accounts, instruction_data),
+        EscrowInstruction::JoinOffer => join_offer(program_id, accounts, instruction_data),
+        EscrowInstruction::FundEscrow => fund_escrow(program_id, accounts),
+        EscrowInstruction::ConfirmEscrow => confirm_escrow(program_id, accounts),
+        EscrowInstruction::ArbiterConfirm => arbiter_confirm(program_id, accounts),
+        EscrowInstruction::ArbiterCancel => arbiter_cancel(program_id, accounts),
+        EscrowInstruction::CloseEscrow => close_escrow(program_id, accounts),
+        EscrowInstruction::GetEscrowInfo => get_escrow_info(program_id, accounts),
+        EscrowInstruction::MutualCancel => mutual_cancel(program_id, accounts),
+        EscrowInstruction::SellerConfirm => seller_confirm(program_id, accounts),
     }
 }
 
-/// Instruction 0: Create offer
-/// Accounts:
-///   [signer] initiator (buyer or seller)
-///   [writable] escrow_account (PDA)
-///   [writable] vault (PDA or ATA)
-///   [] system_program
-///   [] mint (SPL token mint, or native_mint for SOL)
-/// instruction_data: [0, role(1 byte), amount(8 bytes), arbiter(32 bytes), mint(32 bytes)]
-/// role: 0 = buyer creates, 1 = seller creates
+/// Создаёт новое предложение ордера, к которому может подключиться другая сторона.
+/// При создании с инициатора списывается комиссия 0.01 SOL для fee payer.
+/// 
+/// # Аккаунты
+/// * `[signer]` initiator - Сторона, создающая ордер (покупатель или продавец)
+/// * `[writable]` escrow_account - PDA для хранения данных ордера
+/// * `[writable]` vault - PDA для хранения средств
+/// * `[]` system_program - Системная программа для создания аккаунтов
+/// * `[]` mint - Минт SPL токена (нативный минт для SOL)
+/// * `[writable]` fee_collector - Аккаунт сервиса для сбора комиссии
+/// 
+/// # Данные инструкции
+/// * байт 0: тип инструкции (0)
+/// * байт 1: роль (0 = покупатель создаёт, 1 = продавец создаёт)
+/// * байты 2-9: сумма (u64, little-endian)
+/// * байты 10-41: pubkey арбитра (32 байта)
+/// * байты 42-73: pubkey минта (32 байта)
+/// * байты 74-105: pubkey fee_collector (32 байта)
+/// * байты 106-137: random_seed для анонимности (32 байта)
 fn create_offer(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
-    if instruction_data.len() != 74 { // 1 + 1 + 8 + 32 + 32
-        msg!("Invalid instruction data length");
-        return Err(ProgramError::InvalidInstructionData);
-    }
+    ValidationHelper::validate_instruction_data_length(instruction_data, 138, "CreateOffer")?; // 1 + 1 + 8 + 32 + 32 + 32 + 32
     
     let role = instruction_data[1];
     let amount = u64::from_le_bytes(instruction_data[2..10].try_into().unwrap());
     let arbiter = Pubkey::new_from_array(instruction_data[10..42].try_into().unwrap());
     let mint = Pubkey::new_from_array(instruction_data[42..74].try_into().unwrap());
+    let fee_collector = Pubkey::new_from_array(instruction_data[74..106].try_into().unwrap());
+    let random_seed: [u8; 32] = instruction_data[106..138].try_into().unwrap();
 
     let accounts_iter = &mut accounts.iter();
     let initiator = next_account_info(accounts_iter)?; // Buyer or seller
     let escrow_account = next_account_info(accounts_iter)?; // Escrow PDA
     let vault = next_account_info(accounts_iter)?; // Vault PDA or ATA
     let system_program = next_account_info(accounts_iter)?;
-    let mint_account = next_account_info(accounts_iter)?;
+    let _mint_account = next_account_info(accounts_iter)?;
+    let fee_collector_account = next_account_info(accounts_iter)?; // Аккаунт сервиса
 
-    if !initiator.is_signer {
-        msg!("Initiator must be signer");
-       return Err(ProgramError::MissingRequiredSignature);
-    }
+    ValidationHelper::validate_signer(initiator, "Initiator")?;
+    ValidationHelper::validate_fee_collector(fee_collector_account, &fee_collector)?;
+    ValidationHelper::validate_sufficient_balance(initiator, SERVICE_FEE, "service fee payment")?;
+
+    // Переводим комиссию сервиса (0.01 SOL) через system program
+    invoke(
+        &system_instruction::transfer(initiator.key, fee_collector_account.key, SERVICE_FEE),
+        &[initiator.clone(), fee_collector_account.clone(), system_program.clone()],
+    )?;
+    msg!("Комиссия сервиса {} lamports переведена на {}", SERVICE_FEE, fee_collector);
 
     let (vault_pda, vault_bump) = Pubkey::find_program_address(
         &[b"vault", escrow_account.key.as_ref()],
@@ -203,30 +135,19 @@ fn create_offer(
         return Err(ProgramError::InvalidSeeds);
     }
 
-        let rent = Rent::get()?;
+    let rent = Rent::get()?;
     let required_lamports = rent.minimum_balance(EscrowAccount::LEN);
 
     if escrow_account.lamports() == 0 {
-        let create_ix = system_instruction::create_account(
-            initiator.key,
-            escrow_account.key,
-            required_lamports,
+        let escrow_bump = ValidationHelper::validate_escrow_pda_with_seed(escrow_account, &random_seed, program_id)?;
+        AccountHelper::create_pda_account(
+            initiator,
+            escrow_account,
+            system_program,
+            program_id,
+            &[b"escrow", &random_seed, &[escrow_bump]],
             EscrowAccount::LEN as u64,
-            program_id,
-        );
-        // Seed для escrow PDA: например, [b"escrow", initiator.key.as_ref()]
-        let (escrow_pda, escrow_bump) = Pubkey::find_program_address(
-            &[b"escrow", initiator.key.as_ref()],
-            program_id,
-        );
-        if escrow_pda != *escrow_account.key {
-            msg!("Invalid escrow PDA");
-            return Err(ProgramError::InvalidSeeds);
-        }
-        invoke_signed(
-            &create_ix,
-            &[initiator.clone(), escrow_account.clone(), system_program.clone()],
-            &[&[b"escrow", initiator.key.as_ref(), &[escrow_bump]]],
+            required_lamports,
         )?;
     }
 
@@ -245,29 +166,29 @@ fn create_offer(
         state: EscrowState::Created as u8,
         vault_bump,
         mint,
+        fee_collector,
     };
     
     let rent = Rent::get()?;
-    let required_lamports = rent.minimum_balance(0); 
+    // CRITICAL FIX: Правильно рассчитываем rent для vault аккаунта
+    let vault_rent = rent.minimum_balance(0); // Для пустого аккаунта
     
-    // Create vault account if not exists (for SOL or SPL, logic may differ in fund_escrow)
+    // Create vault account if not exists
     if vault.lamports() == 0 {
-        let create_ix = system_instruction::create_account(
-            initiator.key,
-            vault.key,
-            required_lamports,
-            0,
-            program_id
-        );
+        // CRITICAL FIX: Проверяем, что у initiator достаточно средств для создания vault
+        if initiator.lamports() < vault_rent {
+            msg!("Insufficient funds to create vault account");
+            return Err(ProgramError::InsufficientFunds);
+        }
         
-        invoke_signed(
-            &create_ix,
-            &[
-                initiator.clone(),
-                vault.clone(),
-                system_program.clone(),
-            ],
-            &[&[b"vault", escrow_account.key.as_ref(), &[vault_bump]]],
+        AccountHelper::create_pda_account(
+            initiator,
+            vault,
+            system_program,
+            program_id,
+            &[b"vault", escrow_account.key.as_ref(), &[vault_bump]],
+            0,
+            vault_rent,
         )?;
     }
 
@@ -279,20 +200,22 @@ fn create_offer(
     Ok(())
 }
 
-/// Instruction 1: Second party joins offer
-/// Accounts:
-///   [signer] joiner (buyer or seller)
-///   [writable] escrow_account (PDA)
-/// instruction_data: [1, role(1 byte), joiner(32 bytes)]
-/// role: 0 = buyer joins, 1 = seller joins
+/// Allows the second party to join an existing escrow offer.
+/// 
+/// # Accounts
+/// * `[signer]` joiner - The party joining the offer
+/// * `[writable]` escrow_account - Escrow PDA to update
+/// 
+/// # Instruction Data
+/// * byte 0: instruction type (1)
+/// * byte 1: role (0 = buyer joins, 1 = seller joins)
+/// * bytes 2-33: joiner pubkey (32 bytes)
 fn join_offer(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
-    if instruction_data.len() != 34 { // 1 + 1 + 32
-        return Err(ProgramError::InvalidInstructionData);
-    }
+    ValidationHelper::validate_instruction_data_length(instruction_data, 34, "JoinOffer")?;
     
     let role = instruction_data[1];
     let joiner = Pubkey::new_from_array(instruction_data[2..34].try_into().unwrap());
@@ -301,10 +224,16 @@ fn join_offer(
     let joiner_acc = next_account_info(accounts_iter)?; // Buyer or seller
     let escrow_account = next_account_info(accounts_iter)?; // Escrow PDA
 
-    if !joiner_acc.is_signer {
-        msg!("Joiner must be signer");
-        return Err(ProgramError::MissingRequiredSignature);
+    ValidationHelper::validate_signer(joiner_acc, "Joiner")?;
+    
+    // CRITICAL FIX: Проверяем, что joiner_acc соответствует переданному joiner
+    if *joiner_acc.key != joiner {
+        msg!("Joiner account key does not match provided joiner pubkey");
+        return Err(ProgramError::InvalidAccountData);
     }
+
+    // CRITICAL FIX: Проверяем, что escrow аккаунт принадлежит программе
+    ValidationHelper::validate_program_account(escrow_account, program_id, "escrow_account")?;
 
     let mut escrow_data = EscrowAccount::from_account_data(&escrow_account.try_borrow_data()?)?;
     
@@ -337,27 +266,29 @@ fn join_offer(
     Ok(())
 }
 
-/// Instruction 2: Buyer funds the escrow
-/// Accounts:
-///   [signer] buyer
-///   [writable] escrow_account (PDA)
-///   [writable] vault (PDA)
-///   [] system_program
+/// Allows the buyer to fund the escrow with the agreed amount.
+/// 
+/// # Accounts
+/// * `[signer]` buyer - The buyer funding the escrow
+/// * `[writable]` escrow_account - Escrow PDA
+/// * `[writable]` vault - Vault PDA to receive funds
+/// * `[]` system_program - System program for SOL transfers
+/// * Additional accounts for SPL token transfers (optional)
 fn fund_escrow(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
     let buyer = next_account_info(accounts_iter)?;
     let escrow_account = next_account_info(accounts_iter)?;
     let vault = next_account_info(accounts_iter)?;
     let system_program = next_account_info(accounts_iter)?;
-    let mint_account = next_account_info(accounts_iter).ok(); // optional for SOL
+    let _mint_account = next_account_info(accounts_iter).ok(); // optional for SOL
     let buyer_token_account = next_account_info(accounts_iter).ok(); // optional for SOL
     let vault_token_account = next_account_info(accounts_iter).ok(); // optional for SOL
     let token_program = next_account_info(accounts_iter).ok(); // optional for SOL
 
-    if !buyer.is_signer {
-        msg!("Buyer must be signer");
-        return Err(ProgramError::MissingRequiredSignature);
-    }
+    ValidationHelper::validate_signer(buyer, "Buyer")?;
+    
+    // CRITICAL FIX: Проверяем, что escrow аккаунт принадлежит программе
+    ValidationHelper::validate_program_account(escrow_account, program_id, "escrow_account")?;
 
     let mut escrow_data = EscrowAccount::from_account_data(&escrow_account.try_borrow_data()?)?;
     if escrow_data.get_state()? != EscrowState::Initialized {
@@ -365,17 +296,10 @@ fn fund_escrow(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
         return Err(ProgramError::InvalidAccountData);
     }
 
-    let seeds = &[b"vault", escrow_account.key.as_ref(), &[escrow_data.vault_bump]];
-    let expected_vault = Pubkey::create_program_address(seeds, program_id)?;
-    if expected_vault != *vault.key {
-        msg!("Invalid vault PDA");
-        return Err(ProgramError::InvalidSeeds);
-    }
+    ValidationHelper::validate_vault_pda(vault, escrow_account.key, program_id, escrow_data.vault_bump)?;
+    ValidationHelper::validate_participant(&escrow_data, buyer.key, "buyer")?;
 
-    // SPL token or SOL?
-    let native_mint: Pubkey = Pubkey::new_from_array(spl_token::native_mint::id().to_bytes());
-    if escrow_data.mint == native_mint {
-        // SOL transfer
+    if TokenTransfer::is_native_mint(&escrow_data.mint) {
         invoke(
             &system_instruction::transfer(buyer.key, vault.key, escrow_data.amount),
             &[buyer.clone(), vault.clone(), system_program.clone()],
@@ -384,24 +308,14 @@ fn fund_escrow(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
         let buyer_token_account = buyer_token_account.ok_or(ProgramError::NotEnoughAccountKeys)?;
         let vault_token_account = vault_token_account.ok_or(ProgramError::NotEnoughAccountKeys)?;
         let token_program = token_program.ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let mut ix = spl_token::instruction::transfer(
-            &spl_pubkey::Pubkey::new_from_array(token_program.key.to_bytes()),
-            &spl_pubkey::Pubkey::new_from_array(buyer_token_account.key.to_bytes()),
-            &spl_pubkey::Pubkey::new_from_array(vault_token_account.key.to_bytes()),
-            &spl_pubkey::Pubkey::new_from_array(buyer.key.to_bytes()),
-            &[],
-            escrow_data.amount,
-        ).map_err(|_e| ProgramError::Custom(1))?;
-        let ix: solana_program::instruction::Instruction = unsafe { std::mem::transmute(ix) };
         
-        invoke(
-            &ix,
-            &[
-                buyer_token_account.clone(),
-                vault_token_account.clone(),
-                buyer.clone(),
-                token_program.clone(),
-            ],
+        TokenTransfer::transfer_spl_token(
+            buyer_token_account,
+            vault_token_account,
+            buyer,
+            token_program,
+            escrow_data.amount,
+            None,
         )?;
     }
 
@@ -411,41 +325,43 @@ fn fund_escrow(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     Ok(())
 }
 
-/// Instruction 9: Seller confirms fulfillment
-/// Accounts:
-///   [signer] seller
-///   [writable] escrow_account (PDA)
+/// Allows the seller to confirm they have fulfilled their obligations.
+/// 
+/// # Accounts
+/// * `[signer]` seller - The seller confirming fulfillment
+/// * `[writable]` escrow_account - Escrow PDA to update
 fn seller_confirm(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
     let seller = next_account_info(accounts_iter)?;
     let escrow_account = next_account_info(accounts_iter)?;
 
-    if !seller.is_signer {
-        msg!("Seller must be signer");
-        return Err(ProgramError::MissingRequiredSignature);
-    }
+    ValidationHelper::validate_signer(seller, "Seller")?;
+    
+    // CRITICAL FIX: Проверяем, что escrow аккаунт принадлежит программе
+    ValidationHelper::validate_program_account(escrow_account, program_id, "escrow_account")?;
+    
     let mut escrow_data = EscrowAccount::from_account_data(&escrow_account.try_borrow_data()?)?;
     if escrow_data.get_state()? != EscrowState::Funded {
         msg!("Escrow must be in Funded state");
         return Err(ProgramError::InvalidAccountData);
     }
-    if escrow_data.seller != *seller.key {
-        msg!("Invalid seller");
-        return Err(ProgramError::IllegalOwner);
-    }
+    ValidationHelper::validate_participant(&escrow_data, seller.key, "seller")?;
     escrow_data.set_state(EscrowState::SellerConfirmed);
     escrow_data.save_to_account(escrow_account)?;
     msg!("Seller confirmed fulfillment. State: SellerConfirmed");
     Ok(())
 }
 
-/// Instruction 3: Buyer confirms escrow, funds go to seller (only after seller_confirm)
-/// Accounts:
-///   [signer] buyer
-///   [writable] escrow_account (PDA)
-///   [writable] vault (PDA)
-///   [] system_program
-///   [writable] seller_account
+/// Allows the buyer to confirm the escrow and release funds to seller.
+/// This can only be called after the seller has confirmed fulfillment.
+/// 
+/// # Accounts
+/// * `[signer]` buyer - The buyer confirming the transaction
+/// * `[writable]` escrow_account - Escrow PDA
+/// * `[writable]` vault - Vault PDA holding the funds
+/// * `[]` system_program - System program
+/// * `[writable]` seller_account - Seller's account to receive funds
+/// * Additional accounts for SPL token transfers (optional)
 fn confirm_escrow(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
     let buyer = next_account_info(accounts_iter)?;
@@ -453,24 +369,22 @@ fn confirm_escrow(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResul
     let vault = next_account_info(accounts_iter)?;
     let system_program = next_account_info(accounts_iter)?;
     let seller_account = next_account_info(accounts_iter)?;
-    let mint_account = next_account_info(accounts_iter).ok();
+    let _mint_account = next_account_info(accounts_iter).ok();
     let vault_token_account = next_account_info(accounts_iter).ok();
     let seller_token_account = next_account_info(accounts_iter).ok();
     let token_program = next_account_info(accounts_iter).ok();
 
-    if !buyer.is_signer {
-        msg!("Buyer must be signer");
-        return Err(ProgramError::MissingRequiredSignature);
-    }
+    ValidationHelper::validate_signer(buyer, "Buyer")?;
+    
+    // CRITICAL FIX: Проверяем, что escrow аккаунт принадлежит программе
+    ValidationHelper::validate_program_account(escrow_account, program_id, "escrow_account")?;
+    
     let mut escrow_data = EscrowAccount::from_account_data(&escrow_account.try_borrow_data()?)?;
     if escrow_data.get_state()? != EscrowState::SellerConfirmed {
         msg!("Escrow must be in SellerConfirmed state");
         return Err(ProgramError::InvalidAccountData);
     }
-    if escrow_data.buyer != *buyer.key {
-        msg!("Invalid buyer");
-        return Err(ProgramError::IllegalOwner);
-    }
+    ValidationHelper::validate_participant(&escrow_data, buyer.key, "buyer")?;
     let seller = escrow_data.seller;
     if seller == Pubkey::default() {
         msg!("Seller not set");
@@ -480,35 +394,20 @@ fn confirm_escrow(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResul
         msg!("Invalid seller account");
         return Err(ProgramError::InvalidAccountData);
     }
-    // SPL token or SOL?
-    let native_mint: Pubkey = Pubkey::new_from_array(spl_token::native_mint::id().to_bytes());
-    if escrow_data.mint == native_mint {
-        // SOL transfer
-        **vault.try_borrow_mut_lamports()? -= escrow_data.amount;
-        **seller_account.try_borrow_mut_lamports()? += escrow_data.amount;
+    if TokenTransfer::is_native_mint(&escrow_data.mint) {
+        TokenTransfer::transfer_sol(vault, seller_account, escrow_data.amount)?;
     } else {
         let vault_token_account = vault_token_account.ok_or(ProgramError::NotEnoughAccountKeys)?;
         let seller_token_account = seller_token_account.ok_or(ProgramError::NotEnoughAccountKeys)?;
         let token_program = token_program.ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let mut ix = spl_token::instruction::transfer(
-            &spl_pubkey::Pubkey::new_from_array(token_program.key.to_bytes()),
-            &spl_pubkey::Pubkey::new_from_array(vault_token_account.key.to_bytes()),
-            &spl_pubkey::Pubkey::new_from_array(seller_token_account.key.to_bytes()),
-            &spl_pubkey::Pubkey::new_from_array(vault.key.to_bytes()),
-            &[],
-            escrow_data.amount,
-        ).map_err(|_e| ProgramError::Custom(1))?;
-        let ix: solana_program::instruction::Instruction = unsafe { std::mem::transmute(ix) };
         
-        invoke_signed(
-            &ix,
-            &[
-                vault_token_account.clone(),
-                seller_token_account.clone(),
-                vault.clone(),
-                token_program.clone(),
-            ],
-            &[&[b"vault", escrow_account.key.as_ref(), &[escrow_data.vault_bump]]],
+        TokenTransfer::transfer_spl_token(
+            vault_token_account,
+            seller_token_account,
+            vault,
+            token_program,
+            escrow_data.amount,
+            Some(&[b"vault", escrow_account.key.as_ref(), &[escrow_data.vault_bump]]),
         )?;
     }
     escrow_data.set_state(EscrowState::Completed);
@@ -524,7 +423,7 @@ fn confirm_escrow(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResul
 ///   [writable] vault (PDA)
 ///   [writable] seller_account
 fn arbiter_confirm(
-    program_id: &Pubkey,
+    _program_id: &Pubkey,
     accounts: &[AccountInfo],
 ) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
@@ -532,15 +431,12 @@ fn arbiter_confirm(
     let escrow_account = next_account_info(accounts_iter)?;
     let vault = next_account_info(accounts_iter)?;
     let seller = next_account_info(accounts_iter)?;
-    let mint_account = next_account_info(accounts_iter).ok();
+    let _mint_account = next_account_info(accounts_iter).ok();
     let vault_token_account = next_account_info(accounts_iter).ok();
     let seller_token_account = next_account_info(accounts_iter).ok();
     let token_program = next_account_info(accounts_iter).ok();
 
-    if !arbiter.is_signer {
-        msg!("Arbiter must be signer");
-        return Err(ProgramError::MissingRequiredSignature);
-    }
+    ValidationHelper::validate_signer(arbiter, "Arbiter")?;
     let mut escrow_data = EscrowAccount::from_account_data(&escrow_account.try_borrow_data()?)?;
     let state = escrow_data.get_state()?;
     if state != EscrowState::Funded && state != EscrowState::SellerConfirmed {
@@ -551,33 +447,22 @@ fn arbiter_confirm(
         msg!("Invalid seller account");
         return Err(ProgramError::InvalidAccountData);
     }
-    if escrow_data.arbiter != *arbiter.key {
-        msg!("Invalid arbiter");
-        return Err(ProgramError::IllegalOwner);
-    }
-    // SPL token or SOL?
-    let native_mint: Pubkey = Pubkey::new_from_array(spl_token::native_mint::id().to_bytes());
-    if escrow_data.mint == native_mint {
-        // SOL (старое поведение)
-        **vault.try_borrow_mut_lamports()? -= escrow_data.amount;
-        **seller.try_borrow_mut_lamports()? += escrow_data.amount;
+    ValidationHelper::validate_participant(&escrow_data, arbiter.key, "arbiter")?;
+    // CRITICAL FIX: Используем безопасный transfer вместо прямого изменения lamports
+    if TokenTransfer::is_native_mint(&escrow_data.mint) {
+        TokenTransfer::transfer_sol(vault, seller, escrow_data.amount)?;
     } else {
         let vault_token_account = vault_token_account.ok_or(ProgramError::NotEnoughAccountKeys)?;
         let seller_token_account = seller_token_account.ok_or(ProgramError::NotEnoughAccountKeys)?;
         let token_program = token_program.ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let mut ix = spl_token::instruction::transfer(
-            &spl_pubkey::Pubkey::new_from_array(token_program.key.to_bytes()),
-            &spl_pubkey::Pubkey::new_from_array(vault_token_account.key.to_bytes()),
-            &spl_pubkey::Pubkey::new_from_array(seller_token_account.key.to_bytes()),
-            &spl_pubkey::Pubkey::new_from_array(vault.key.to_bytes()),
-            &[],
+        // CRITICAL FIX: Используем безопасный TokenTransfer вместо unsafe transmute
+        TokenTransfer::transfer_spl_token(
+            vault_token_account,
+            seller_token_account,
+            vault,
+            token_program,
             escrow_data.amount,
-        ).map_err(|_e| ProgramError::Custom(1))?;
-        let ix: solana_program::instruction::Instruction = unsafe { std::mem::transmute(ix) };
-        invoke_signed(
-            &ix,
-            &[vault_token_account.clone(), seller_token_account.clone(), vault.clone(), token_program.clone()],
-            &[&[b"vault", escrow_account.key.as_ref(), &[escrow_data.vault_bump]]],
+            Some(&[b"vault", escrow_account.key.as_ref(), &[escrow_data.vault_bump]]),
         )?;
     }
     escrow_data.set_state(EscrowState::Completed);
@@ -593,7 +478,7 @@ fn arbiter_confirm(
 ///   [writable] vault (PDA)
 ///   [writable] buyer_account
 fn arbiter_cancel(
-    program_id: &Pubkey,
+    _program_id: &Pubkey,
     accounts: &[AccountInfo],
 ) -> ProgramResult {
     let accounts_iter = &mut accounts.iter();
@@ -601,15 +486,12 @@ fn arbiter_cancel(
     let escrow_account = next_account_info(accounts_iter)?;
     let vault = next_account_info(accounts_iter)?;
     let buyer = next_account_info(accounts_iter)?;
-    let mint_account = next_account_info(accounts_iter).ok();
+    let _mint_account = next_account_info(accounts_iter).ok();
     let vault_token_account = next_account_info(accounts_iter).ok();
     let buyer_token_account = next_account_info(accounts_iter).ok();
     let token_program = next_account_info(accounts_iter).ok();
 
-    if !arbiter.is_signer {
-        msg!("Arbiter must be signer");
-        return Err(ProgramError::MissingRequiredSignature);
-    }
+    ValidationHelper::validate_signer(arbiter, "Arbiter")?;
     let mut escrow_data = EscrowAccount::from_account_data(&escrow_account.try_borrow_data()?)?;
     let state = escrow_data.get_state()?;
     if state != EscrowState::Funded && state != EscrowState::SellerConfirmed {
@@ -620,33 +502,22 @@ fn arbiter_cancel(
         msg!("Invalid buyer account");
         return Err(ProgramError::InvalidAccountData);
     }
-    if escrow_data.arbiter != *arbiter.key {
-        msg!("Invalid arbiter");
-        return Err(ProgramError::IllegalOwner);
-    }
-    // SPL token or SOL?
-    let native_mint: Pubkey = Pubkey::new_from_array(spl_token::native_mint::id().to_bytes());
-    if escrow_data.mint == native_mint {
-        // SOL (старое поведение)
-        **vault.try_borrow_mut_lamports()? -= escrow_data.amount;
-        **buyer.try_borrow_mut_lamports()? += escrow_data.amount;
+    ValidationHelper::validate_participant(&escrow_data, arbiter.key, "arbiter")?;
+    // CRITICAL FIX: Используем безопасный transfer вместо прямого изменения lamports
+    if TokenTransfer::is_native_mint(&escrow_data.mint) {
+        TokenTransfer::transfer_sol(vault, buyer, escrow_data.amount)?;
     } else {
         let vault_token_account = vault_token_account.ok_or(ProgramError::NotEnoughAccountKeys)?;
         let buyer_token_account = buyer_token_account.ok_or(ProgramError::NotEnoughAccountKeys)?;
         let token_program = token_program.ok_or(ProgramError::NotEnoughAccountKeys)?;
-        let mut ix = spl_token::instruction::transfer(
-            &spl_pubkey::Pubkey::new_from_array(token_program.key.to_bytes()),
-            &spl_pubkey::Pubkey::new_from_array(vault_token_account.key.to_bytes()),
-            &spl_pubkey::Pubkey::new_from_array(buyer_token_account.key.to_bytes()),
-            &spl_pubkey::Pubkey::new_from_array(vault.key.to_bytes()),
-            &[],
+        // CRITICAL FIX: Используем безопасный TokenTransfer вместо unsafe transmute
+        TokenTransfer::transfer_spl_token(
+            vault_token_account,
+            buyer_token_account,
+            vault,
+            token_program,
             escrow_data.amount,
-        ).map_err(|_e| ProgramError::Custom(1))?;
-        let ix: solana_program::instruction::Instruction = unsafe { std::mem::transmute(ix) };
-        invoke_signed(
-            &ix,
-            &[vault_token_account.clone(), buyer_token_account.clone(), vault.clone(), token_program.clone()],
-            &[&[b"vault", escrow_account.key.as_ref(), &[escrow_data.vault_bump]]],
+            Some(&[b"vault", escrow_account.key.as_ref(), &[escrow_data.vault_bump]]),
         )?;
     }
     escrow_data.set_state(EscrowState::Cancelled);
@@ -670,15 +541,19 @@ fn mutual_cancel(
     let seller = next_account_info(accounts_iter)?;
     let escrow_account = next_account_info(accounts_iter)?;
     let vault = next_account_info(accounts_iter)?;
-    let mint_account = next_account_info(accounts_iter).ok();
+    let _mint_account = next_account_info(accounts_iter).ok();
     let vault_token_account = next_account_info(accounts_iter).ok();
     let buyer_token_account = next_account_info(accounts_iter).ok();
     let token_program = next_account_info(accounts_iter).ok();
 
+    // CRITICAL FIX: Проверяем подписи в самом начале
     if !buyer.is_signer || !seller.is_signer {
         msg!("Both buyer and seller must sign");
         return Err(ProgramError::MissingRequiredSignature);
     }
+    
+    // CRITICAL FIX: Проверяем, что escrow аккаунт принадлежит программе
+    ValidationHelper::validate_program_account(escrow_account, program_id, "escrow_account")?;
 
     let mut escrow_data = EscrowAccount::from_account_data(&escrow_account.try_borrow_data()?)?;
     let state = escrow_data.get_state()?;
@@ -695,29 +570,22 @@ fn mutual_cancel(
         return Err(ProgramError::InvalidAccountData);
     }
     // If funded, return funds to buyer
-    let native_mint: Pubkey = Pubkey::new_from_array(spl_token::native_mint::id().to_bytes());
     if state == EscrowState::Funded {
-        if escrow_data.mint == native_mint {
-            // SOL
-            **vault.try_borrow_mut_lamports()? -= escrow_data.amount;
-            **buyer.try_borrow_mut_lamports()? += escrow_data.amount;
+        // CRITICAL FIX: Используем безопасный transfer вместо прямого изменения lamports
+        if TokenTransfer::is_native_mint(&escrow_data.mint) {
+            TokenTransfer::transfer_sol(vault, buyer, escrow_data.amount)?;
         } else {
             let vault_token_account = vault_token_account.ok_or(ProgramError::NotEnoughAccountKeys)?;
             let buyer_token_account = buyer_token_account.ok_or(ProgramError::NotEnoughAccountKeys)?;
             let token_program = token_program.ok_or(ProgramError::NotEnoughAccountKeys)?;
-            let mut ix = spl_token::instruction::transfer(
-                &spl_pubkey::Pubkey::new_from_array(token_program.key.to_bytes()),
-                &spl_pubkey::Pubkey::new_from_array(vault_token_account.key.to_bytes()),
-                &spl_pubkey::Pubkey::new_from_array(buyer_token_account.key.to_bytes()),
-                &spl_pubkey::Pubkey::new_from_array(vault.key.to_bytes()),
-                &[],
+            // CRITICAL FIX: Используем безопасный TokenTransfer вместо unsafe transmute
+            TokenTransfer::transfer_spl_token(
+                vault_token_account,
+                buyer_token_account,
+                vault,
+                token_program,
                 escrow_data.amount,
-            ).map_err(|_e| ProgramError::Custom(1))?;
-            let ix: solana_program::instruction::Instruction = unsafe { std::mem::transmute(ix) };
-            invoke_signed(
-                &ix,
-                &[vault_token_account.clone(), buyer_token_account.clone(), vault.clone(), token_program.clone()],
-                &[&[b"vault", escrow_account.key.as_ref(), &[escrow_data.vault_bump]]],
+                Some(&[b"vault", escrow_account.key.as_ref(), &[escrow_data.vault_bump]]),
             )?;
         }
     }
@@ -739,24 +607,17 @@ fn close_escrow(
     let closer = next_account_info(accounts_iter)?;
     let escrow_account = next_account_info(accounts_iter)?;
 
-    if !closer.is_signer {
-        msg!("Closer must be signer");
-        return Err(ProgramError::MissingRequiredSignature);
-    }
+    ValidationHelper::validate_signer(closer, "Closer")?;
 
     let escrow_data = EscrowAccount::from_account_data(&escrow_account.try_borrow_data()?)?;
     let state = escrow_data.get_state()?;
     
-    if state != EscrowState::Completed && state != EscrowState::Cancelled {
+    if !escrow_data.can_be_closed()? {
         msg!("Escrow must be completed or cancelled");
         return Err(ProgramError::InvalidAccountData);
     }
 
-    let valid_closer = *closer.key == escrow_data.buyer 
-        || *closer.key == escrow_data.seller 
-        || *closer.key == escrow_data.arbiter;
-    
-    if !valid_closer {
+    if !escrow_data.is_participant(closer.key) {
         msg!("Closer must be participant or arbiter");
         return Err(ProgramError::IllegalOwner);
     }
@@ -778,9 +639,10 @@ fn close_escrow(
     Ok(())
 }
 
-/// Instruction 7: Print escrow info to logs
-/// Accounts:
-///   [writable] escrow_account (PDA)
+/// Prints escrow information to the program logs for debugging.
+/// 
+/// # Accounts
+/// * `[]` escrow_account - Escrow PDA to read from
 fn get_escrow_info(
     program_id: &Pubkey,
     accounts: &[AccountInfo],

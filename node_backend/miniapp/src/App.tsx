@@ -41,11 +41,14 @@ if (typeof window !== 'undefined') {
 }
 
 // === HARDCODED CONFIG ===
-const API_URL = 'https://55c14c3635b6.ngrok-free.app';
-const PROGRAM_ID = new PublicKey('7WBqX2Lo4g4BxhTwKqGijJAqBWtnSukH96SaFhJsiehg');
+const API_URL = 'http://localhost:3000'; // Update with your actual API URL
+const PROGRAM_ID = new PublicKey('7aduXLXPVvUXX9hDWrKDyeJF1ij7hQxYnah4EzcSFmmE');
 const ARBITER = new PublicKey('DVPU9yF5G6TzH8LtfrACYrdAjWmgr8gd7u1xaWSu4sTQ');
 const CONNECTION_URL = 'https://api.devnet.solana.com';
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
+
+// Fee collector will be fetched from API
+let FEE_COLLECTOR: PublicKey | null = null;
 
 // Добавлено: Проверка мобильного устройства
 const isMobile = () => {
@@ -126,7 +129,7 @@ function App() {
   const [refresh, setRefresh] = useState<number>(0);
   const [manageContract, setManageContract] = useState<Contract | null>(null);
   const [actionsOpen, setActionsOpen] = useState<boolean>(false);
-  const ESCROW_ACCOUNT_SIZE = 138;
+  const ESCROW_ACCOUNT_SIZE = 170; // Обновлённый размер с fee_collector (+32 байта)
   const getPublicKey = (address: string) => new PublicKey(address);
 
   useEffect(() => {
@@ -145,86 +148,130 @@ function App() {
     }
   };
 
-  // Create a new escrow order (on-chain + backend)
+  // Create a new escrow order with automatic fee collection
   const handleCreateOrder = async ({ amount, description, role, mint }: CreateOrderParams): Promise<void> => {
       if (!walletAddress || !wallet?.adapter) throw new Error('Wallet not connected');
+      
       try {
           const connection = new Connection(CONNECTION_URL, 'confirmed');
           const userPubkey = getPublicKey(walletAddress);
-          const escrowAccount = Keypair.generate();
-          const [vault, vaultBump] = await PublicKey.findProgramAddress(
-              [Buffer.from('vault'), escrowAccount.publicKey.toBuffer()],
-              PROGRAM_ID
-          );
-
-          // 1. Create escrow account on-chain
-          const createEscrowIx = SystemProgram.createAccount({
-              fromPubkey: userPubkey,
-              newAccountPubkey: escrowAccount.publicKey,
-              lamports: await connection.getMinimumBalanceForRentExemption(ESCROW_ACCOUNT_SIZE),
-              space: ESCROW_ACCOUNT_SIZE,
-              programId: PROGRAM_ID
-          });
-
-          // 2. Prepare create_offer instruction
-          const instructionData = Buffer.alloc(1 + 1 + 8 + 32 + 32);
-          instructionData[0] = 0;
-          instructionData[1] = role === 'buyer' ? 0 : 1;
-          instructionData.writeBigUInt64LE(BigInt(Number(amount)), 2);
-          ARBITER.toBuffer().copy(instructionData, 10);
-          new PublicKey(mint).toBuffer().copy(instructionData, 42);
-
-          const createOfferIx = new TransactionInstruction({
-              keys: [
-                  { pubkey: userPubkey, isSigner: true, isWritable: true },
-                  { pubkey: escrowAccount.publicKey, isSigner: true, isWritable: true },
-                  { pubkey: vault, isSigner: false, isWritable: true },
-                  { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-                  { pubkey: new PublicKey(mint), isSigner: false, isWritable: false },
-              ],
-              programId: PROGRAM_ID,
-              data: instructionData
-          });
-
-          // 3. Build transaction
-          const tx = new Transaction().add(createEscrowIx, createOfferIx);
-          tx.feePayer = userPubkey;
-          tx.recentBlockhash = (await connection.getRecentBlockhash()).blockhash;
           
-          // 4. Подписываем транзакцию двумя подписями:
-          //    - Подпись от escrow-аккаунта (локально)
-          //    - Подпись от пользователя (через кошелек)
-          tx.partialSign(escrowAccount);
-
-          // Always use wallet.adapter.sendTransaction for both desktop and mobile
-          const txid = await wallet.adapter.sendTransaction(tx, connection);
-          await connection.confirmTransaction(txid, 'confirmed');
-
-          // 5. Save contract metadata to backend
-          const res = await fetch(`${API_URL}/contracts`, {
+          // 1. Получаем подготовленную транзакцию с API
+          const prepareRes = await fetch(`${API_URL}/contracts/prepare_create`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                  escrowAccount: escrowAccount.publicKey.toBase58(),
-                  vault: vault.toBase58(),
+                  initiatorPubkey: walletAddress,
+                  arbiter: ARBITER.toBase58(),
+                  amount: Number(amount),
+                  description,
+                  role: role === 'buyer' ? '0' : '1',
+                  mint: mint === SOL_MINT ? null : mint,
+                  programId: PROGRAM_ID.toBase58(),
+              })
+          });
+          
+          if (!prepareRes.ok) {
+              const err = await prepareRes.json();
+              throw new Error(err.error || 'Failed to prepare transaction');
+          }
+          
+          const prepareData = await prepareRes.json();
+          const { escrowPDA, vaultPDA, randomSeed, instructionData, accounts, programId, serviceFeeLamports } = prepareData;
+          
+          // 2. Создаем create_offer инструкцию с fee_collector (аккаунты создадутся автоматически)
+          const createOfferIx = new TransactionInstruction({
+              keys: [
+                  { pubkey: userPubkey, isSigner: true, isWritable: true },
+                  { pubkey: new PublicKey(escrowPDA), isSigner: false, isWritable: true },
+                  { pubkey: new PublicKey(vaultPDA), isSigner: false, isWritable: true },
+                  { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+                  { pubkey: new PublicKey(accounts.mint), isSigner: false, isWritable: false },
+                  { pubkey: new PublicKey(accounts.feeCollector), isSigner: false, isWritable: true },
+              ],
+              programId: new PublicKey(programId),
+              data: Buffer.from(instructionData)
+          });
+          
+          // 3. Собираем транзакцию
+          const tx = new Transaction().add(createOfferIx);
+          tx.feePayer = userPubkey;
+          const { blockhash } = await connection.getLatestBlockhash();
+          tx.recentBlockhash = blockhash;
+          
+          // 4. Отправляем через кошелек
+          console.log('Transaction details:', {
+              feePayer: tx.feePayer?.toBase58(),
+              recentBlockhash: tx.recentBlockhash,
+              instructions: tx.instructions.length,
+              accounts: tx.instructions[0].keys.map(k => ({
+                  pubkey: k.pubkey.toBase58(),
+                  isSigner: k.isSigner,
+                  isWritable: k.isWritable
+              }))
+          });
+          
+          // Сначала симулируем транзакцию для получения детальной информации об ошибках
+          console.log('Simulating transaction...');
+          try {
+              const simulation = await connection.simulateTransaction(tx);
+              console.log('Simulation result:', simulation);
+              
+              if (simulation.value.err) {
+                  console.error('Simulation failed:', simulation.value.err);
+                  throw new Error(`Transaction simulation failed: ${JSON.stringify(simulation.value.err)}`);
+              }
+          } catch (simError: any) {
+              console.error('Simulation error:', simError);
+              throw new Error(`Failed to simulate transaction: ${simError.message}`);
+          }
+          
+          let txid: string;
+          try {
+              txid = await wallet.adapter.sendTransaction(tx, connection, {
+                  skipPreflight: true, // Пропускаем preflight т.к. уже симулировали
+                  preflightCommitment: 'confirmed'
+              });
+              console.log('Transaction sent:', txid);
+              
+              await connection.confirmTransaction(txid, 'confirmed');
+              console.log('Transaction confirmed');
+          } catch (sendError: any) {
+              console.error('Send transaction error:', sendError);
+              throw sendError;
+          }
+          
+          // 5. Сохраняем в базе данных
+          const saveRes = await fetch(`${API_URL}/contracts/save_created`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                  escrowPDA,
+                  vaultPDA,
+                  randomSeed,
                   arbiter: ARBITER.toBase58(),
                   buyer: role === 'buyer' ? userPubkey.toBase58() : null,
                   seller: role === 'seller' ? userPubkey.toBase58() : null,
                   amount: Number(amount),
                   description,
                   txid,
-                  role,
+                  role: role === 'buyer' ? '0' : '1',
+                  mint: mint === SOL_MINT ? null : mint,
                   programId: PROGRAM_ID.toBase58(),
-                  mint,
               })
           });
           
-          if (!res.ok) {
-              const err = await res.json();
-              throw new Error(err.error || 'Order creation error');
+          if (!saveRes.ok) {
+              const err = await saveRes.json();
+              console.warn('Failed to save to database:', err);
+              // Не прерываем выполнение, т.к. транзакция уже прошла
           }
+          
           setRefresh(r => r + 1);
-          toast.success('Order created successfully!');
+          toast.success(
+              `Order created! Service fee: ${serviceFeeLamports / 1e9} SOL collected.\nTx: ${txid.slice(0, 8)}...`
+          );
+          
       } catch (error: any) {
           console.error('Error creating contract:', error);
           toast.error(error.message || 'Order creation error');
@@ -234,68 +281,127 @@ function App() {
   const handleApplyOrder = async (escrowAddress: string): Promise<void> => {
       if (!walletAddress || !wallet?.adapter) throw new Error('Wallet not connected');
       if (!isValidBase58(escrowAddress)) throw new Error('Invalid contract address');
+      
       try {
-          const connection = new Connection(CONNECTION_URL, 'confirmed');
           const userPubkey = getPublicKey(walletAddress);
+          
           // 1. Fetch contract info from backend
           const contractRes = await fetch(`${API_URL}/contracts/by_address/${escrowAddress}`);
           if (!contractRes.ok) {
               throw new Error('Contract not found');
           }
           const contract = await contractRes.json();
-          // 2. Determine joiner role
+          
+          // 2. Determine joiner role based on who created and what's available
           let joinerRole;
-          if (contract.role === 'seller') {
+          console.log('Contract data:', contract);
+          
+          if (contract.buyer && contract.seller) {
+              throw new Error('Contract is already full - both buyer and seller are set');
+          }
+          
+          // If creator was buyer, join as seller
+          if (contract.buyer && !contract.seller) {
+              joinerRole = 'seller';
+          }
+          // If creator was seller, join as buyer  
+          else if (contract.seller && !contract.buyer) {
+              joinerRole = 'buyer';
+          }
+          // Fallback to old logic if role field is available
+          else if (contract.role === 'seller' || contract.role === '1') {
               joinerRole = 'buyer'; // If seller created, join as buyer
           } else {
               joinerRole = 'seller'; // If buyer created, join as seller
           }
-          // 3. Prepare join_offer instruction
-          const data = Buffer.alloc(1 + 1 + 32);
-          data[0] = 1; // join_offer
-          data[1] = joinerRole === 'buyer' ? 0 : 1; // 0 = buyer joins, 1 = seller joins
-          Buffer.from(userPubkey.toBytes()).copy(data, 2);
-          const instruction = new TransactionInstruction({
-              programId: PROGRAM_ID,
-              keys: [
-                  { pubkey: userPubkey, isSigner: true, isWritable: true }, // joiner
-                  { pubkey: new PublicKey(escrowAddress), isSigner: false, isWritable: true }
-              ],
-              data
-          });
-          // 4. Build and sign transaction
-          const tx = new Transaction().add(instruction);
-          tx.feePayer = userPubkey;
-          tx.recentBlockhash = (await connection.getRecentBlockhash()).blockhash;
-          // Always use wallet.adapter.sendTransaction for both desktop and mobile
-          const sig = await wallet.adapter.sendTransaction(tx, connection);
-          await connection.confirmTransaction(sig, 'confirmed');
-          // 6. Update backend with join info
-          const body = {
-              joiner: userPubkey.toBase58(),
-              escrowAccount: escrowAddress,
-              programId: PROGRAM_ID.toBase58(),
-              txid: sig,
-              role: contract.role
-          };
-          const res = await fetch(`${API_URL}/contracts/${escrowAddress}/join`, {
+          
+          console.log('Determined joiner role:', joinerRole);
+          
+          // 3. Prepare transaction with fee_payer through backend
+          const prepareRes = await fetch(`${API_URL}/contracts/prepare_join`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(body)
+              body: JSON.stringify({
+                  escrowAddress,
+                  joinerPubkey: userPubkey.toBase58(),
+                  role: joinerRole === 'buyer' ? '0' : '1'
+              })
           });
-          if (!res.ok) {
-              const err = await res.json();
-              throw new Error(err.error || 'Order join error');
+          
+          if (!prepareRes.ok) {
+              const err = await prepareRes.json();
+              throw new Error(err.error || 'Failed to prepare transaction');
           }
+          
+          const prepareData = await prepareRes.json();
+          
+          // 4. Create transaction from prepared data and send through wallet
+          // The backend has already prepared the transaction with fee_payer as feePayer
+          const transaction = Transaction.from(Buffer.from(prepareData.transaction, 'base64'));
+          const connection = new Connection(CONNECTION_URL, 'confirmed');
+          
+          console.log('Transaction details:', {
+              feePayer: transaction.feePayer?.toBase58(),
+              recentBlockhash: transaction.recentBlockhash,
+              instructions: transaction.instructions.length,
+              signatures: transaction.signatures.length,
+              accounts: transaction.instructions[0]?.keys.map(k => ({
+                  pubkey: k.pubkey.toBase58(),
+                  isSigner: k.isSigner,
+                  isWritable: k.isWritable
+              }))
+          });
+          
+          // Simulate transaction first
+          console.log('Simulating transaction...');
+          try {
+              const simulation = await connection.simulateTransaction(transaction);
+              console.log('Simulation result:', simulation);
+              
+              if (simulation.value.err) {
+                  console.error('Simulation failed:', simulation.value.err);
+                  throw new Error(`Transaction simulation failed: ${JSON.stringify(simulation.value.err)}`);
+              }
+          } catch (simError: any) {
+              console.error('Simulation error:', simError);
+              throw new Error(`Failed to simulate transaction: ${simError.message}`);
+          }
+          
+          // Send transaction - wallet will sign and fee_payer will pay gas
+          const txid = await wallet.adapter.sendTransaction(transaction, connection, {
+              skipPreflight: true, // Skip since we already simulated
+              preflightCommitment: 'confirmed'
+          });
+          
+          await connection.confirmTransaction(txid, 'confirmed');
+          console.log('Transaction confirmed:', txid);
+          
+          // 5. Update database through backend
+          const completeRes = await fetch(`${API_URL}/contracts/complete_join`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                  txid,
+                  escrowAddress,
+                  joinerPubkey: userPubkey.toBase58(),
+                  role: joinerRole === 'buyer' ? '0' : '1'
+              })
+          });
+          
+          if (!completeRes.ok) {
+              const err = await completeRes.json();
+              console.warn('Failed to update database:', err);
+              // Don't throw error since transaction already succeeded
+          }
+          
+          const result = { txid };
+          
+          toast.success(`Successfully joined as ${joinerRole}! Gas paid by service. Tx: ${result.txid.slice(0, 8)}...`);
           setRefresh(r => r + 1);
+          
       } catch (error: any) {
-          console.error('Error join order:', error);
-          if (error.logs) {
-              alert((error.message || 'Order join error') + '\n\nLogs:\n' + error.logs.join('\n'));
-          } else {
-              alert(error.message || 'Order join error');
-          }
-          throw error;
+          console.error('Apply order error:', error);
+          toast.error(error.message || 'Failed to join order');
       }
   };
 
@@ -326,87 +432,122 @@ function App() {
           let instruction: TransactionInstruction, tx: Transaction, sig: string, body: any;
           switch (action) {
               case 'fund': {
-                  // Buyer funds the escrow (state: initialized -> funded)
-                  const mintStr = contract.mint;
-                  if (!mintStr) throw new Error('Mint is undefined');
-                  let mint: PublicKey;
-                  try {
-                      mint = new PublicKey(mintStr);
-                  } catch (e) {
-                      throw new Error('Mint is not a valid public key: ' + mintStr);
-                  }
-                  const isSol = mint.toBase58() === SOL_MINT;
-                  if (!walletAddress) throw new Error('Wallet address is undefined');
-                  if (!vault) throw new Error('Vault is undefined');
-                  console.log('funding with mint:', mint.toBase58(), 'wallet:', walletAddress, 'vault:', vault);
-                  const keys = [
-                      { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, // buyer
-                      { pubkey: new PublicKey(address), isSigner: false, isWritable: true },
-                      { pubkey: new PublicKey(vault), isSigner: false, isWritable: true },
-                      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }
-                  ];
-                  const instructions = [];
-                  if (!isSol) {
-                      const connection = new Connection(CONNECTION_URL, 'confirmed');
-                      const buyerTokenAccount = await getAssociatedTokenAddress(mint, getPublicKey(walletAddress));
-                      const vaultTokenAccount = await getAssociatedTokenAddress(mint, new PublicKey(vault), true);
-                      try {
-                          await getAccount(connection, buyerTokenAccount);
-                      } catch {
-                          instructions.push(
-                              createAssociatedTokenAccountInstruction(
-                                  getPublicKey(walletAddress), 
-                                  buyerTokenAccount,
-                                  getPublicKey(walletAddress),
-                                  mint
-                              )
-                          );
-                      }
-                      try {
-                          await getAccount(connection, vaultTokenAccount);
-                      } catch {
-                          instructions.push(
-                              createAssociatedTokenAccountInstruction(
-                                  getPublicKey(walletAddress), 
-                                  vaultTokenAccount,
-                                  new PublicKey(vault),
-                                  mint
-                              )
-                          );
-                      }
-                      keys.push(
-                          { pubkey: mint, isSigner: false, isWritable: false },
-                          { pubkey: buyerTokenAccount, isSigner: false, isWritable: true },
-                          { pubkey: vaultTokenAccount, isSigner: false, isWritable: true },
-                          { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }
-                      );
-                  }
-                  const data = Buffer.from([2]);
-                  instruction = new TransactionInstruction({
-                      programId: new PublicKey(programId),
-                      keys,
-                      data
+                  // Buyer funds the escrow with fee_payer gas payment
+                  const userPubkey = getPublicKey(walletAddress);
+                  
+                  // 1. Prepare transaction through backend
+                  const prepareRes = await fetch(`${API_URL}/contracts/prepare_fund`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                          escrowAddress: address,
+                          buyerPubkey: userPubkey.toBase58()
+                      })
                   });
-                  tx = new Transaction();
-                  if (instructions.length > 0) {
-                      for (const ix of instructions) tx.add(ix);
+                  
+                  if (!prepareRes.ok) {
+                      const err = await prepareRes.json();
+                      throw new Error(err.error || 'Failed to prepare fund transaction');
                   }
-                  tx.add(instruction);
-                  break;
+                  
+                  const prepareData = await prepareRes.json();
+                  
+                  // 2. Create transaction and send through wallet (fee_payer pays gas)
+                  const transaction = Transaction.from(Buffer.from(prepareData.transaction, 'base64'));
+                  const connection = new Connection(CONNECTION_URL, 'confirmed');
+                  
+                  // Simulate first
+                  try {
+                      const simulation = await connection.simulateTransaction(transaction);
+                      if (simulation.value.err) {
+                          throw new Error(`Transaction simulation failed: ${JSON.stringify(simulation.value.err)}`);
+                      }
+                  } catch (simError: any) {
+                      throw new Error(`Failed to simulate transaction: ${simError.message}`);
+                  }
+                  
+                  // Send transaction
+                  const txid = await wallet.adapter.sendTransaction(transaction, connection, {
+                      skipPreflight: true,
+                      preflightCommitment: 'confirmed'
+                  });
+                  
+                  await connection.confirmTransaction(txid, 'confirmed');
+                  
+                  // 3. Update database
+                  const completeRes = await fetch(`${API_URL}/contracts/complete_fund`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                          txid,
+                          escrowAddress: address,
+                          buyerPubkey: userPubkey.toBase58()
+                      })
+                  });
+                  
+                  if (!completeRes.ok) {
+                      const err = await completeRes.json();
+                      console.warn('Failed to update database:', err);
+                  }
+                  
+                  toast.success(`Escrow funded successfully! Gas paid by service. Tx: ${txid.slice(0, 8)}...`);
+                  setRefresh(r => r + 1);
+                  setActionsOpen(false);
+                  return; // Exit early since we handled everything
               }
               case 'confirm': {
-                  // Seller confirms fulfillment (state: funded -> seller_confirmed)
-                  const data = Buffer.from([9]);
-                  instruction = new TransactionInstruction({
-                      programId: new PublicKey(programId),
-                      keys: [
-                          { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, // seller
-                          { pubkey: new PublicKey(address), isSigner: false, isWritable: true }
-                      ],
-                      data
+                  // Seller confirms fulfillment with fee_payer gas payment
+                  const userPubkey = getPublicKey(walletAddress);
+                  
+                  // 1. Prepare transaction through backend
+                  const prepareRes = await fetch(`${API_URL}/contracts/prepare_seller_confirm`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                          escrowAddress: address,
+                          sellerPubkey: userPubkey.toBase58()
+                      })
                   });
-                  tx = new Transaction().add(instruction);
-                  break;
+                  
+                  if (!prepareRes.ok) {
+                      const err = await prepareRes.json();
+                      throw new Error(err.error || 'Failed to prepare seller confirm transaction');
+                  }
+                  
+                  const prepareData = await prepareRes.json();
+                  
+                  // 2. Create transaction and send through wallet (fee_payer pays gas)
+                  const transaction = Transaction.from(Buffer.from(prepareData.transaction, 'base64'));
+                  const connection = new Connection(CONNECTION_URL, 'confirmed');
+                  
+                  // Send transaction
+                  const txid = await wallet.adapter.sendTransaction(transaction, connection, {
+                      skipPreflight: true,
+                      preflightCommitment: 'confirmed'
+                  });
+                  
+                  await connection.confirmTransaction(txid, 'confirmed');
+                  
+                  // 3. Update database
+                  const completeRes = await fetch(`${API_URL}/contracts/complete_seller_confirm`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                          txid,
+                          escrowAddress: address,
+                          sellerPubkey: userPubkey.toBase58()
+                      })
+                  });
+                  
+                  if (!completeRes.ok) {
+                      const err = await completeRes.json();
+                      console.warn('Failed to update database:', err);
+                  }
+                  
+                  toast.success(`Seller confirmed fulfillment! Gas paid by service. Tx: ${txid.slice(0, 8)}...`);
+                  setRefresh(r => r + 1);
+                  setActionsOpen(false);
+                  return; // Exit early since we handled everything
               }
               case 'arbiter_confirm': {
                   // Arbiter confirms escrow, funds go to seller
@@ -572,72 +713,58 @@ function App() {
                   break;
               }
               case 'buyer_confirm': {
-                  // Buyer confirms escrow, funds go to seller (state: seller_confirmed -> completed)
-                  const mintStr = contract.mint;
-                  if (!mintStr) throw new Error('Mint is undefined');
-                  let mint: PublicKey;
-                  try {
-                      mint = new PublicKey(mintStr);
-                  } catch (e) {
-                      throw new Error('Mint is not a valid public key: ' + mintStr);
-                  }
-                  const isSol = mint.toBase58() === SOL_MINT;
-                  const keys = [
-                      { pubkey: getPublicKey(walletAddress), isSigner: true, isWritable: true }, // buyer
-                      { pubkey: new PublicKey(address), isSigner: false, isWritable: true }, // escrowAccount
-                      { pubkey: new PublicKey(vault), isSigner: false, isWritable: true }, // vault
-                      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false }, // system_program
-                      { pubkey: new PublicKey(seller), isSigner: false, isWritable: true } // seller_account
-                  ];
-                  const instructions = [];
-                  if (!isSol) {
-                      const connection = new Connection(CONNECTION_URL, 'confirmed');
-                      const vaultTokenAccount = await getAssociatedTokenAddress(mint, new PublicKey(vault), true);
-                      const sellerTokenAccount = await getAssociatedTokenAddress(mint, new PublicKey(seller));
-                      // Проверяем, существует ли vault ATA
-                      try {
-                          await getAccount(connection, vaultTokenAccount);
-                      } catch {
-                          instructions.push(
-                              createAssociatedTokenAccountInstruction(
-                                  getPublicKey(walletAddress), 
-                                  vaultTokenAccount,
-                                  new PublicKey(vault),
-                                  mint
-                              )
-                          );
-                      }
-                      try {
-                          await getAccount(connection, sellerTokenAccount);
-                      } catch {
-                          instructions.push(
-                              createAssociatedTokenAccountInstruction(
-                                  getPublicKey(walletAddress),
-                                  sellerTokenAccount,
-                                  new PublicKey(seller),
-                                  mint
-                              )
-                          );
-                      }
-                      keys.push(
-                          { pubkey: mint, isSigner: false, isWritable: false },
-                          { pubkey: vaultTokenAccount, isSigner: false, isWritable: true },
-                          { pubkey: sellerTokenAccount, isSigner: false, isWritable: true },
-                          { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }
-                      );
-                  }
-                  const data = Buffer.from([3]);
-                  instruction = new TransactionInstruction({
-                      programId: new PublicKey(programId),
-                      keys,
-                      data
+                  // Buyer confirms escrow with fee_payer gas payment
+                  const userPubkey = getPublicKey(walletAddress);
+                  
+                  // 1. Prepare transaction through backend
+                  const prepareRes = await fetch(`${API_URL}/contracts/prepare_buyer_confirm`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                          escrowAddress: address,
+                          buyerPubkey: userPubkey.toBase58()
+                      })
                   });
-                  tx = new Transaction();
-                  if (instructions.length > 0) {
-                      for (const ix of instructions) tx.add(ix);
+                  
+                  if (!prepareRes.ok) {
+                      const err = await prepareRes.json();
+                      throw new Error(err.error || 'Failed to prepare buyer confirm transaction');
                   }
-                  tx.add(instruction);
-                  break;
+                  
+                  const prepareData = await prepareRes.json();
+                  
+                  // 2. Create transaction and send through wallet (fee_payer pays gas)
+                  const transaction = Transaction.from(Buffer.from(prepareData.transaction, 'base64'));
+                  const connection = new Connection(CONNECTION_URL, 'confirmed');
+                  
+                  // Send transaction
+                  const txid = await wallet.adapter.sendTransaction(transaction, connection, {
+                      skipPreflight: true,
+                      preflightCommitment: 'confirmed'
+                  });
+                  
+                  await connection.confirmTransaction(txid, 'confirmed');
+                  
+                  // 3. Update database
+                  const completeRes = await fetch(`${API_URL}/contracts/complete_buyer_confirm`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                          txid,
+                          escrowAddress: address,
+                          buyerPubkey: userPubkey.toBase58()
+                      })
+                  });
+                  
+                  if (!completeRes.ok) {
+                      const err = await completeRes.json();
+                      console.warn('Failed to update database:', err);
+                  }
+                  
+                  toast.success(`Escrow confirmed! Funds released to seller. Gas paid by service. Tx: ${txid.slice(0, 8)}...`);
+                  setRefresh(r => r + 1);
+                  setActionsOpen(false);
+                  return; // Exit early since we handled everything
               }
               default:
                   throw new Error('Unknown action');
@@ -656,8 +783,7 @@ function App() {
           };
           // Map action to status for backend update
           let status = null;
-          if (action === 'fund') status = 'funded';
-          else if (action === 'confirm') status = 'seller_confirmed';
+          if (action === 'confirm') status = 'seller_confirmed';
           else if (action === 'buyer_confirm') status = 'completed';
           else if (action === 'arbiter_confirm') status = 'completed';
           else if (action === 'arbiter_cancel') status = 'cancelled';

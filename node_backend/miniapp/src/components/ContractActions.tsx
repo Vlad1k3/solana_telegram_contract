@@ -62,10 +62,10 @@ function ContractActions({ contract, open, onClose, onAction, arbiterAddress, wa
                     <button onClick={handleCopy} style={{ marginLeft: 8, background: 'none', border: 'none', color: '#14f195', cursor: 'pointer', fontWeight: 700 }}>{copied ? '✓' : '⧉'}</button>
                 </div>
                 <div style={{ fontSize: 14, color: '#aaa', marginBottom: 8 }}>
-                    <span>Amount: <span style={{ color: '#14f195', fontWeight: 600 }}>{(contract.amount / 1_000_000_000).toLocaleString()} {contract.mint === SOL_MINT ? 'SOL' : 'SPL'}</span></span>
+                    <span>Amount: <span style={{ color: '#14f195', fontWeight: 600 }}>{(contract.amount / 1_000_000_000).toLocaleString()} {!contract.mint || contract.mint === SOL_MINT ? 'SOL' : 'SPL'}</span></span>
                 </div>
                 <div style={{ fontSize: 14, color: '#aaa', marginBottom: 8 }}>
-                    Token: {contract.mint === SOL_MINT ? 'SOL' : 'SPL'}
+                    Token: {!contract.mint || contract.mint === SOL_MINT ? 'SOL' : 'SPL'}
                     {contract.mint && contract.mint !== SOL_MINT && (
                         <span style={{ marginLeft: 8, color: '#fff' }}>Mint: {shortMint(contract.mint)}</span>
                     )}

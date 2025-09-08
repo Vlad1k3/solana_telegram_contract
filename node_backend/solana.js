@@ -8,27 +8,35 @@ const solanaWeb3 = require('@solana/web3.js');
 async function createOffer({
   connectionUrl,
   programId,
-  buyerKeypair,
+  initiatorKeypair,
   escrowAccountPubkey,
   vaultPubkey,
   arbiterPubkey,
-  amount
+  amount,
+  role,
+  mint,
+  feeCollectorPubkey
 }) {
   const connection = new solanaWeb3.Connection(connectionUrl, 'confirmed');
 
-  // Инструкция: [0, amount(8 bytes), arbiter(32 bytes)]
-  const instructionData = Buffer.alloc(1 + 8 + 32);
-  instructionData[0] = 0; // create_offer
-  instructionData.writeBigUInt64LE(BigInt(amount), 1);
-  Buffer.from(arbiterPubkey.toBytes()).copy(instructionData, 9);
+  // Новый формат инструкции: [0, role(1), amount(8), arbiter(32), mint(32), fee_collector(32)]
+  const instructionData = Buffer.alloc(1 + 1 + 8 + 32 + 32 + 32); // 106 bytes total
+  instructionData[0] = 0; // create_offer instruction
+  instructionData[1] = role; // 0 = buyer creates, 1 = seller creates
+  instructionData.writeBigUInt64LE(BigInt(amount), 2); // amount
+  Buffer.from(arbiterPubkey.toBytes()).copy(instructionData, 10); // arbiter pubkey
+  Buffer.from(mint.toBytes()).copy(instructionData, 42); // mint pubkey
+  Buffer.from(feeCollectorPubkey.toBytes()).copy(instructionData, 74); // fee_collector pubkey
 
   const instruction = new solanaWeb3.TransactionInstruction({
     programId: new solanaWeb3.PublicKey(programId),
     keys: [
-      { pubkey: buyerKeypair.publicKey, isSigner: true, isWritable: true },
+      { pubkey: initiatorKeypair.publicKey, isSigner: true, isWritable: true },
       { pubkey: escrowAccountPubkey, isSigner: false, isWritable: true },
       { pubkey: vaultPubkey, isSigner: false, isWritable: true },
       { pubkey: solanaWeb3.SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: mint, isSigner: false, isWritable: false }, // mint account
+      { pubkey: feeCollectorPubkey, isSigner: false, isWritable: true }, // fee collector account
     ],
     data: instructionData
   });
@@ -37,27 +45,32 @@ async function createOffer({
   const signature = await solanaWeb3.sendAndConfirmTransaction(
     connection,
     tx,
-    [buyerKeypair]
+    [initiatorKeypair]
   );
   return signature;
 }
 
 // --- join_offer ---
-async function joinOffer({ connectionUrl, programId, sellerKeypair, escrowAccountPubkey }) {
+async function joinOffer({ connectionUrl, programId, joinerKeypair, escrowAccountPubkey, role }) {
   const connection = new solanaWeb3.Connection(connectionUrl, 'confirmed');
-  const instructionData = Buffer.alloc(1 + 32);
-  instructionData[0] = 1; // join_offer
-  Buffer.from(sellerKeypair.publicKey.toBytes()).copy(instructionData, 1);
+  
+  // Новый формат: [1, role(1), joiner_pubkey(32)]
+  const instructionData = Buffer.alloc(1 + 1 + 32); // 34 bytes
+  instructionData[0] = 1; // join_offer instruction
+  instructionData[1] = role; // 0 = buyer joins, 1 = seller joins
+  Buffer.from(joinerKeypair.publicKey.toBytes()).copy(instructionData, 2);
+  
   const instruction = new solanaWeb3.TransactionInstruction({
     programId: new solanaWeb3.PublicKey(programId),
     keys: [
-      { pubkey: sellerKeypair.publicKey, isSigner: true, isWritable: true },
+      { pubkey: joinerKeypair.publicKey, isSigner: true, isWritable: true },
       { pubkey: escrowAccountPubkey, isSigner: false, isWritable: true },
     ],
     data: instructionData
   });
+  
   const tx = new solanaWeb3.Transaction().add(instruction);
-  const signature = await solanaWeb3.sendAndConfirmTransaction(connection, tx, [sellerKeypair]);
+  const signature = await solanaWeb3.sendAndConfirmTransaction(connection, tx, [joinerKeypair]);
   return signature;
 }
 

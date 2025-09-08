@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 
-const API_URL = 'https://55c14c3635b6.ngrok-free.app';
+const API_URL = 'http://localhost:3000'; // Update with your actual API URL
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
 function shortAddr(addr: string): string {
@@ -23,7 +23,8 @@ export interface Contract {
     amount: number;
     description: string;
     status?: string;
-    mint?: string; // Added mint field
+    mint?: string;
+    fee_collector?: string; // Added fee_collector field
     [key: string]: any;
 }
 
@@ -120,10 +121,10 @@ function ContractsList({ walletAddress, onRemove, onManage }: ContractsListProps
                                 </button>
                             </div>
                             <div style={{ fontSize: 14, color: '#aaa', marginBottom: 4 }}>
-                                Amount: <span style={{ color: '#14f195', fontWeight: 600 }}>{(contract.amount / 1_000_000_000).toLocaleString()} {contract.mint === SOL_MINT ? 'SOL' : 'SPL'}</span>
+                                Amount: <span style={{ color: '#14f195', fontWeight: 600 }}>{(contract.amount / 1_000_000_000).toLocaleString()} {!contract.mint || contract.mint === SOL_MINT ? 'SOL' : 'SPL'}</span>
                             </div>
                             <div style={{ fontSize: 14, color: '#aaa', marginBottom: 4 }}>
-                                Token: {contract.mint === SOL_MINT ? 'SOL' : 'SPL'}
+                                Token: {!contract.mint || contract.mint === SOL_MINT ? 'SOL' : 'SPL'}
                                 {contract.mint && contract.mint !== SOL_MINT && (
                                     <span style={{ marginLeft: 8, color: '#fff' }}>Mint: {shortMint(contract.mint)}</span>
                                 )}

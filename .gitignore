@@ -31,3 +31,5 @@ Thumbs.db
 
 # Ignore all .bin symlinks (npm)
 **/.bin/
+INTEGRATION_GUIDE.md
+validate_contract.js
