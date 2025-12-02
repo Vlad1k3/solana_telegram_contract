@@ -42,7 +42,7 @@ if (typeof window !== 'undefined') {
 
 // === HARDCODED CONFIG ===
 const API_URL = 'http://localhost:3000'; // Update with your actual API URL
-const PROGRAM_ID = new PublicKey('7aduXLXPVvUXX9hDWrKDyeJF1ij7hQxYnah4EzcSFmmE');
+const PROGRAM_ID = new PublicKey('4RmyxvmUcatjLrAGwuXqLBdLLCXmaz6W8BNqzFTBZDKY');
 const ARBITER = new PublicKey('DVPU9yF5G6TzH8LtfrACYrdAjWmgr8gd7u1xaWSu4sTQ');
 const CONNECTION_URL = 'https://api.devnet.solana.com';
 const SOL_MINT = 'So11111111111111111111111111111111111111112';

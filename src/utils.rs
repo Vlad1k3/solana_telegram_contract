@@ -1,29 +1,53 @@
 use solana_program::{
     account_info::AccountInfo,
     entrypoint::ProgramResult,
+    instruction::{AccountMeta, Instruction},
     msg,
     program::{invoke, invoke_signed},
     program_error::ProgramError,
     pubkey::Pubkey,
     system_instruction,
 };
-use spl_token::solana_program::pubkey as spl_pubkey;
 
 use crate::state::EscrowAccount;
+
+/// SPL Token program ID (hardcoded to avoid type conflicts)
+pub const SPL_TOKEN_PROGRAM_ID: Pubkey = solana_program::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+
+/// Native SOL mint address
+pub const NATIVE_MINT: Pubkey = solana_program::pubkey!("So11111111111111111111111111111111111111112");
 
 pub struct TokenTransfer;
 
 impl TokenTransfer {
+    /// Transfer SOL from a PDA (program-owned account) to another account
+    /// Note: This only works when `from` is owned by the program
     pub fn transfer_sol(
         from: &AccountInfo,
         to: &AccountInfo,
         amount: u64,
     ) -> ProgramResult {
-        **from.try_borrow_mut_lamports()? -= amount;
-        **to.try_borrow_mut_lamports()? += amount;
+        // Check for underflow
+        let from_balance = from.lamports();
+        if from_balance < amount {
+            msg!("Insufficient SOL balance: have {}, need {}", from_balance, amount);
+            return Err(ProgramError::InsufficientFunds);
+        }
+        
+        **from.try_borrow_mut_lamports()? = from_balance
+            .checked_sub(amount)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+        
+        **to.try_borrow_mut_lamports()? = to
+            .lamports()
+            .checked_add(amount)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+        
         Ok(())
     }
 
+    /// Transfer SPL tokens using CPI
+    /// Builds the instruction manually to avoid type conflicts between spl_token and solana_program
     pub fn transfer_spl_token<'a>(
         from_token_account: &AccountInfo<'a>,
         to_token_account: &AccountInfo<'a>,
@@ -32,44 +56,58 @@ impl TokenTransfer {
         amount: u64,
         authority_seeds: Option<&[&[u8]]>,
     ) -> ProgramResult {
-        let ix = spl_token::instruction::transfer(
-            &spl_pubkey::Pubkey::new_from_array(token_program.key.to_bytes()),
-            &spl_pubkey::Pubkey::new_from_array(from_token_account.key.to_bytes()),
-            &spl_pubkey::Pubkey::new_from_array(to_token_account.key.to_bytes()),
-            &spl_pubkey::Pubkey::new_from_array(authority.key.to_bytes()),
-            &[],
-            amount,
-        ).map_err(|_| ProgramError::Custom(1))?;
+        // Validate token program
+        if *token_program.key != SPL_TOKEN_PROGRAM_ID {
+            msg!("Invalid token program: expected {}, got {}", 
+                 SPL_TOKEN_PROGRAM_ID, token_program.key);
+            return Err(ProgramError::IncorrectProgramId);
+        }
 
-        let ix: solana_program::instruction::Instruction = unsafe { std::mem::transmute(ix) };
+        // Build SPL Token Transfer instruction manually
+        // Instruction layout: [instruction_type (1 byte), amount (8 bytes LE)]
+        // instruction_type 3 = Transfer
+        let mut data = Vec::with_capacity(9);
+        data.push(3); // Transfer instruction
+        data.extend_from_slice(&amount.to_le_bytes());
+
+        let accounts = vec![
+            AccountMeta::new(*from_token_account.key, false),
+            AccountMeta::new(*to_token_account.key, false),
+            AccountMeta::new_readonly(*authority.key, authority_seeds.is_none()),
+        ];
+
+        let ix = Instruction {
+            program_id: SPL_TOKEN_PROGRAM_ID,
+            accounts,
+            data,
+        };
+
+        let account_infos = &[
+            from_token_account.clone(),
+            to_token_account.clone(),
+            authority.clone(),
+            token_program.clone(),
+        ];
 
         if let Some(seeds) = authority_seeds {
-            invoke_signed(
-                &ix,
-                &[
-                    from_token_account.clone(),
-                    to_token_account.clone(),
-                    authority.clone(),
-                    token_program.clone(),
-                ],
-                &[seeds],
-            )
+            invoke_signed(&ix, account_infos, &[seeds])
         } else {
-            invoke(
-                &ix,
-                &[
-                    from_token_account.clone(),
-                    to_token_account.clone(),
-                    authority.clone(),
-                    token_program.clone(),
-                ],
-            )
+            invoke(&ix, account_infos)
         }
     }
 
+    /// Check if mint is the native SOL mint (wrapped SOL)
     pub fn is_native_mint(mint: &Pubkey) -> bool {
-        let native_mint = Pubkey::new_from_array(spl_token::native_mint::id().to_bytes());
-        *mint == native_mint
+        *mint == NATIVE_MINT
+    }
+
+    /// Validate that the token program account is the correct SPL Token program
+    pub fn validate_token_program(token_program: &AccountInfo) -> ProgramResult {
+        if *token_program.key != SPL_TOKEN_PROGRAM_ID {
+            msg!("Invalid token program");
+            return Err(ProgramError::IncorrectProgramId);
+        }
+        Ok(())
     }
 }
 
@@ -84,10 +122,23 @@ impl ValidationHelper {
         Ok(())
     }
 
-    pub fn validate_program_account(account: &AccountInfo, program_id: &Pubkey, account_name: &str) -> ProgramResult {
+    pub fn validate_program_account(
+        account: &AccountInfo, 
+        program_id: &Pubkey, 
+        account_name: &str
+    ) -> ProgramResult {
         if account.owner != program_id {
-            msg!("{} must be owned by program", account_name);
+            msg!("{} must be owned by program. Owner: {}, Expected: {}", 
+                 account_name, account.owner, program_id);
             return Err(ProgramError::IllegalOwner);
+        }
+        Ok(())
+    }
+
+    pub fn validate_system_program(system_program: &AccountInfo) -> ProgramResult {
+        if *system_program.key != solana_program::system_program::id() {
+            msg!("Invalid system program");
+            return Err(ProgramError::IncorrectProgramId);
         }
         Ok(())
     }
@@ -104,7 +155,7 @@ impl ValidationHelper {
         )?;
         
         if expected_vault != *vault.key {
-            msg!("Invalid vault PDA");
+            msg!("Invalid vault PDA: expected {}, got {}", expected_vault, vault.key);
             return Err(ProgramError::InvalidSeeds);
         }
         Ok(())
@@ -157,7 +208,8 @@ impl ValidationHelper {
         };
 
         if !is_valid {
-            msg!("Invalid {}", expected_role);
+            msg!("Invalid {}: expected one of buyer/seller/arbiter, got {}", 
+                 expected_role, participant);
             return Err(ProgramError::IllegalOwner);
         }
         Ok(())
@@ -185,7 +237,8 @@ impl ValidationHelper {
         expected_fee_collector: &Pubkey,
     ) -> ProgramResult {
         if *fee_collector_account.key != *expected_fee_collector {
-            msg!("Invalid fee collector account");
+            msg!("Invalid fee collector account: expected {}, got {}", 
+                 expected_fee_collector, fee_collector_account.key);
             return Err(ProgramError::InvalidAccountData);
         }
         Ok(())
@@ -203,6 +256,19 @@ impl ValidationHelper {
         }
         Ok(())
     }
+
+    /// Validate that an account matches expected pubkey
+    pub fn validate_account_key(
+        account: &AccountInfo,
+        expected: &Pubkey,
+        account_name: &str,
+    ) -> ProgramResult {
+        if account.key != expected {
+            msg!("Invalid {}: expected {}, got {}", account_name, expected, account.key);
+            return Err(ProgramError::InvalidAccountData);
+        }
+        Ok(())
+    }
 }
 
 pub struct AccountHelper;
@@ -217,6 +283,9 @@ impl AccountHelper {
         space: u64,
         lamports: u64,
     ) -> ProgramResult {
+        // Validate system program
+        ValidationHelper::validate_system_program(system_program)?;
+        
         let create_ix = system_instruction::create_account(
             payer.key,
             account.key,
@@ -230,5 +299,25 @@ impl AccountHelper {
             &[payer.clone(), account.clone(), system_program.clone()],
             &[seeds],
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_native_mint_check() {
+        assert!(TokenTransfer::is_native_mint(&NATIVE_MINT));
+        assert!(!TokenTransfer::is_native_mint(&Pubkey::default()));
+    }
+
+    #[test]
+    fn test_spl_token_program_id() {
+        // Verify the hardcoded SPL Token program ID is correct
+        assert_eq!(
+            SPL_TOKEN_PROGRAM_ID.to_string(),
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        );
     }
 }
